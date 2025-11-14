@@ -1,143 +1,83 @@
-import os
-import json
 import logging
-import requests
-import asyncio
-from datetime import datetime
-from threading import Thread
-from flask import Flask, request, jsonify
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import requests
 
-# ====================== CONFIG ======================
-TOKEN = os.getenv("TOKEN")
-DOMAIN = "ff-like-bot-px1w.onrender.com"
-WEBHOOK_URL = f"https://{DOMAIN}/webhook"
+# -------------------------------
+# CONFIGURATION
+# -------------------------------
 
-# ====================== GUESTS ======================
-GUESTS = []
-USED = set()
+BOT_TOKEN = "7817163480:AAGuev86KtOHZh2UgvX0y6DVw-cQEK4TQn8"
 
-def load_guests():
-    global GUESTS
-    try:
-        with open("guests/ff_guests.json", "r") as f:
-            GUESTS = [json.loads(line.strip()) for line in f if line.strip()]
-        logger.info(f"Loaded {len(GUESTS)} guests")
-    except Exception as e:
-        logger.error(f"Guests error: {e}")
+# ⚠️ IMPORTANT:
+# Yaha apna Cloudflare tunnel URL daalna.
+CLOUDFLARE_URL = "https://fails-earning-millions-informational.trycloudflare.com"  
 
-load_guests()
 
-# ====================== DAILY RESET ======================
-likes_sent = {}
+# -------------------------------
+# LOGGING
+# -------------------------------
 
-def daily_reset():
-    import time
-    while True:
-        time.sleep(3600)
-        now = datetime.now()
-        to_remove = [uid for uid, data in likes_sent.items()
-                     if (now - data["reset"]).total_seconds() > 86400]
-        for uid in to_remove:
-            del likes_sent[uid]
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 
-Thread(target=daily_reset, daemon=True).start()
 
-# ====================== BOT COMMANDS ======================
+# -------------------------------
+# COMMANDS
+# -------------------------------
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "FREE FIRE BOT LIVE!\n\n"
-        f"Guests: {len(GUESTS)}\n"
-        f"Used: {len(USED)}\n\n"
-        "/like 12345678 → 100 real likes"
+        "Hello! 👋\n"
+        "Send /like <FF_ID> to get likes.\n\n"
+        "Example: /like 123456789"
     )
 
+
 async def like(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await update.message.reply_text("Usage: /like 12345678")
+    try:
+        ff_id = context.args[0]
+    except:
+        await update.message.reply_text("❌ Please use: /like <FF_ID>")
+        return
 
-    uid = context.args[0].strip()
-    if not uid.isdigit() or len(uid) < 8:
-        return await update.message.reply_text("Invalid UID!")
+    await update.message.reply_text("⏳ Processing your likes, wait...")
 
-    available = [g for g in GUESTS if g["jwt"] not in USED][:100]
-    if not available:
-        return await update.message.reply_text("No fresh guests!")
+    try:
+        # -------------------------------
+        # REQUEST GOING TO CLOUDFLARE URL
+        # -------------------------------
+        response = requests.get(f"{CLOUDFLARE_URL}/like?id={ff_id}", timeout=15)
+        data = response.json()
 
-    await update.message.reply_text(f"Sending {len(available)} likes to {uid}...")
+        if data.get("status") == "success":
+            likes = data.get("likes", 0)
+            await update.message.reply_text(f"❤️ {likes} Likes Added to ID {ff_id}!")
+        else:
+            await update.message.reply_text("❌ Failed to add likes.")
 
-    sent = 0
-    for g in available:
-        try:
-            headers = {
-                "Authorization": f"Bearer {g['jwt']}",
-                "Content-Type": "application/json",
-                "User-Agent": "GarenaFreeFire/1.0"
-            }
-            payload = {"target_uid": int(uid), "count": 1}
+    except Exception as e:
+        await update.message.reply_text("❌ Server error. Try again later.")
+        logging.error(f"LIKE ERROR: {e}")
 
-            r = requests.post(
-                "https://fails-earning-millions-informational.trycloudflare.com/like
-                ",
-                json=payload,
-                headers=headers,
-                timeout=15
-            )
 
-            try:
-                data = r.json()
-                if ("success" in data and data["success"] is True) or \
-                   ("code" in data and data["code"] == 0):
-                    sent += 1
-                    USED.add(g["jwt"])
-            except:
-                pass
+# -------------------------------
+# MAIN APPLICATION
+# -------------------------------
 
-            await asyncio.sleep(0.3)
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
 
-        except Exception as e:
-            print("LIKE ERROR:", e)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("like", like))
 
-    likes_sent[uid] = {"count": sent, "reset": datetime.now()}
-    await update.message.reply_text(f"SENT {sent} REAL LIKES!\nCheck in-game!")
+    print("BOT RUNNING...")
+    app.run_polling()
 
-# ====================== FLASK APP ======================
-app = Flask(__name__)
 
-application = Application.builder().token(TOKEN).build()
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("like", like))
-
-async def init_bot():
-    await application.initialize()
-    await application.start()
-    await application.bot.set_webhook(WEBHOOK_URL)
-    logger.info(f"Webhook set: {WEBHOOK_URL}")
-
-asyncio.get_event_loop().run_until_complete(init_bot())
-
-# ====================== WEBHOOK ======================
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, application.bot)
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(application.process_update(update))
-
-    return jsonify({"status": "ok"})
-
-@app.route('/')
-def home():
-    return f"Bot LIVE | Guests: {len(GUESTS)}"
-
-# ====================== RUN SERVER ======================
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
-    
+    main()
+            
