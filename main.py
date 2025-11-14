@@ -80,9 +80,20 @@ async def like(update: Update, context: ContextTypes.DEFAULT_TYPE):
             payload = {"target_uid": int(uid), "count": 1, "region": "IND"}
             r = requests.post("https://ssg32-account.garena.com/like",
                               json=payload, headers=headers, timeout=10)
-            if r.status_code == 200:
-                sent += 1
-                USED.add(g['jwt'])
+            # DEBUG: print raw response
+try:
+    print("DEBUG RESPONSE:", r.text)
+except:
+    pass
+
+# Check REAL like success
+try:
+    data = r.json()
+    # Garena new error codes block likes
+    if ("success" in data and data["success"] == True) or ("code" in data and data["code"] == 0):
+        sent += 1
+        USED.add(g['jwt'])
+    
             await asyncio.sleep(0.3)
         except:
             pass
