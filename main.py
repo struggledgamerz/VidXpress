@@ -78,27 +78,35 @@ async def like(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             headers = {"Authorization": f"Bearer {g['jwt']}"}
             payload = {"target_uid": int(uid), "count": 1, "region": "IND"}
-            r = requests.post("https://ssg32-account.garena.com/like",
-                              json=payload, headers=headers, timeout=10)
-            # DEBUG: print raw response
-try:
-    print("DEBUG RESPONSE:", r.text)
-except:
-    pass
 
-# Check REAL like success
-try:
-    data = r.json()
-    # Garena new error codes block likes
-    if ("success" in data and data["success"] == True) or ("code" in data and data["code"] == 0):
-        sent += 1
-        USED.add(g['jwt'])
-        except:
-            pass
-    
+            r = requests.post(
+                "https://ssg32-account.garena.com/like",
+                json=payload, headers=headers, timeout=10
+            )
+
+            # DEBUG — print raw response in Render logs
+            try:
+                print("DEBUG RESPONSE:", r.text)
+            except:
+                pass
+
+            # Check REAL like success
+            try:
+                data = r.json()
+
+                # Garena like success conditions
+                if ("success" in data and data["success"] is True) or \
+                   ("code" in data and data["code"] == 0):
+                    sent += 1
+                    USED.add(g['jwt'])
+
+            except Exception as e:
+                print("JSON PARSE ERROR:", e)
+
             await asyncio.sleep(0.3)
-        except:
-            pass
+
+        except Exception as e:
+            print("LIKE ERROR:", e)
 
     likes_sent[uid] = {"count": sent, "reset": datetime.now()}
     await update.message.reply_text(f"SENT {sent} REAL LIKES!\nCheck in-game!")
@@ -106,14 +114,11 @@ try:
 # ====================== FLASK APP ======================
 app = Flask(__name__)
 
-# Create bot application globally
 application = Application.builder().token(TOKEN).build()
-
-# Add handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("like", like))
 
-# Initialize bot (MOST IMPORTANT for PTB 20)
+# Initialize bot
 async def init_bot():
     await application.initialize()
     await application.start()
@@ -122,7 +127,7 @@ async def init_bot():
 
 asyncio.get_event_loop().run_until_complete(init_bot())
 
-# ====================== WEBHOOK ENDPOINT ======================
+# ====================== WEBHOOK ======================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json(force=True)
@@ -131,17 +136,15 @@ def webhook():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(application.process_update(update))
-    # ❌ DO NOT CLOSE LOOP
-    # loop.close()
 
     return jsonify({"status": "ok"})
-    
-        
+
 @app.route('/')
 def home():
     return f"Bot LIVE | Guests: {len(GUESTS)}"
 
-# ====================== START SERVER ======================
+# ====================== RUN SERVER ======================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+    
