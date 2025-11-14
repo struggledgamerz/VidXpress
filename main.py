@@ -114,9 +114,14 @@ asyncio.get_event_loop().run_until_complete(init_bot())
 def webhook():
     data = request.get_json(force=True)
     update = Update.de_json(data, application.bot)
-    asyncio.get_event_loop().create_task(application.process_update(update))
-    return jsonify({"status": "ok"})
 
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(application.process_update(update))
+    loop.close()
+
+    return jsonify({"status": "ok"})
+        
 @app.route('/')
 def home():
     return f"Bot LIVE | Guests: {len(GUESTS)}"
