@@ -1,83 +1,110 @@
 import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-
+from flask import Flask, request, jsonify
 import requests
+import asyncio
+import os
 
-# -------------------------------
+# ------------------------------------
 # CONFIGURATION
-# -------------------------------
+# ------------------------------------
 
 BOT_TOKEN = "7817163480:AAGuev86KtOHZh2UgvX0y6DVw-cQEK4TQn8"
 
-# ⚠️ IMPORTANT:
-# Yaha apna Cloudflare tunnel URL daalna.
-CLOUDFLARE_URL = "https://fails-earning-millions-informational.trycloudflare.com"  
+# ⚠️ YOUR CLOUDFLARE TUNNEL URL
+CLOUDFLARE_URL = "https://fails-earning-millions-informational.trycloudflare.com"
 
+# Railway domain
+DOMAIN = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
+WEBHOOK_URL = f"https://{DOMAIN}/webhook"
 
-# -------------------------------
+# ------------------------------------
 # LOGGING
-# -------------------------------
+# ------------------------------------
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-
-# -------------------------------
-# COMMANDS
-# -------------------------------
+# ------------------------------------
+# TELEGRAM COMMANDS
+# ------------------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Hello! 👋\n"
-        "Send /like <FF_ID> to get likes.\n\n"
+        "Use /like <FF_ID> to get likes.\n"
         "Example: /like 123456789"
     )
 
 
 async def like(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        ff_id = context.args[0]
-    except:
-        await update.message.reply_text("❌ Please use: /like <FF_ID>")
+    if not context.args:
+        await update.message.reply_text("❌ Usage: /like <FF_ID>")
         return
 
-    await update.message.reply_text("⏳ Processing your likes, wait...")
+    ff_id = context.args[0].strip()
+
+    await update.message.reply_text("⏳ Adding likes, wait...")
 
     try:
-        # -------------------------------
-        # REQUEST GOING TO CLOUDFLARE URL
-        # -------------------------------
-        response = requests.get(f"{CLOUDFLARE_URL}/like?id={ff_id}", timeout=15)
+        # ——————————————
+        # SEND REQUEST TO CLOUDLARE
+        # ——————————————
+        response = requests.get(
+            f"{CLOUDFLARE_URL}/like?id={ff_id}",
+            timeout=20
+        )
+
         data = response.json()
 
         if data.get("status") == "success":
-            likes = data.get("likes", 0)
-            await update.message.reply_text(f"❤️ {likes} Likes Added to ID {ff_id}!")
+            await update.message.reply_text(f"❤️ {data.get('likes',0)} Likes Added!")
         else:
             await update.message.reply_text("❌ Failed to add likes.")
 
     except Exception as e:
-        await update.message.reply_text("❌ Server error. Try again later.")
-        logging.error(f"LIKE ERROR: {e}")
+        logger.error(f"Like error: {e}")
+        await update.message.reply_text("❌ Server error.")
 
 
-# -------------------------------
-# MAIN APPLICATION
-# -------------------------------
+# ------------------------------------
+# FLASK SERVER FOR WEBHOOK
+# ------------------------------------
 
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+app = Flask(__name__)
+application = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("like", like))
-
-    print("BOT RUNNING...")
-    app.run_polling()
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("like", like))
 
 
+# TELEGRAM INIT (WEBHOOK)
+async def init_telegram():
+    await application.initialize()
+    await application.start()
+    await application.bot.set_webhook(WEBHOOK_URL)
+    print("WEBHOOK SET TO:", WEBHOOK_URL)
+
+
+asyncio.get_event_loop().run_until_complete(init_telegram())
+
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    update = Update.de_json(request.json, application.bot)
+    asyncio.get_event_loop().create_task(application.process_update(update))
+    return jsonify({"ok": True})
+
+
+@app.route('/')
+def home():
+    return "Bot Running With Webhook!"
+
+
+# ------------------------------------
+# START SERVER
+# ------------------------------------
 if __name__ == "__main__":
-    main()
-            
+    port = int(os.getenv("PORT", 8000))
+    app.run(host="0.0.0.0", port=port)
