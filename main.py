@@ -7,22 +7,15 @@ from datetime import datetime
 from threading import Thread
 from flask import Flask, request, jsonify
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-import nest_asyncio
-
-nest_asyncio.apply()
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ====================== CONFIG ======================
 TOKEN = os.getenv("TOKEN")
-
-# RENDER_EXTERNAL_HOSTNAME sometimes fails, so we set it manually:
 DOMAIN = "ff-like-bot-px1w.onrender.com"
-
 WEBHOOK_URL = f"https://{DOMAIN}/webhook"
-
 
 # ====================== GUESTS ======================
 GUESTS = []
@@ -54,7 +47,7 @@ def daily_reset():
 
 Thread(target=daily_reset, daemon=True).start()
 
-# ====================== COMMANDS ======================
+# ====================== BOT COMMANDS ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "FREE FIRE BOT LIVE!\n\n"
@@ -97,40 +90,38 @@ async def like(update: Update, context: ContextTypes.DEFAULT_TYPE):
     likes_sent[uid] = {"count": sent, "reset": datetime.now()}
     await update.message.reply_text(f"SENT {sent} REAL LIKES!\nCheck in-game!")
 
-# ====================== LAZY APP (NO UPDATER ERROR) ======================
+# ====================== FLASK APP ======================
 app = Flask(__name__)
-application = None
 
-def get_application():
-    global application
-    if application is None:
-        builder = ApplicationBuilder().token(TOKEN)
-        application = builder.build()
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("like", like))
-    return application
+# Create bot application globally
+application = Application.builder().token(TOKEN).build()
 
-# ====================== WEBHOOK FIXED ======================
+# Add handlers
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("like", like))
+
+# Initialize bot (MOST IMPORTANT for PTB 20)
+async def init_bot():
+    await application.initialize()
+    await application.start()
+    await application.bot.set_webhook(WEBHOOK_URL)
+    logger.info(f"Webhook set: {WEBHOOK_URL}")
+
+asyncio.get_event_loop().run_until_complete(init_bot())
+
+# ====================== WEBHOOK ENDPOINT ======================
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    app_ = get_application()
-    update = Update.de_json(request.get_json(force=True), app_.bot)
-    asyncio.run(app_.process_update(update))
-    return jsonify(success=True)
+    data = request.get_json(force=True)
+    update = Update.de_json(data, application.bot)
+    asyncio.get_event_loop().create_task(application.process_update(update))
+    return jsonify({"status": "ok"})
 
-@app.route('/set_webhook', methods=['GET'])
-def set_webhook():
-    app_ = get_application()
-    asyncio.run(app_.bot.set_webhook(WEBHOOK_URL))
-    return f"Webhook set to {WEBHOOK_URL}"
-
-@app.route('/', methods=['GET'])
+@app.route('/')
 def home():
     return f"Bot LIVE | Guests: {len(GUESTS)}"
 
 # ====================== START SERVER ======================
 if __name__ == "__main__":
-    get_application()
     port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-    
