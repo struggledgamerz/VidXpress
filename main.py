@@ -6,100 +6,62 @@ import requests
 import asyncio
 import os
 
-# ------------------------------------
-# CONFIGURATION
-# ------------------------------------
-
 BOT_TOKEN = "7817163480:AAGuev86KtOHZh2UgvX0y6DVw-cQEK4TQn8"
 CLOUDFLARE_URL = "https://fails-earning-millions-informational.trycloudflare.com"
 
 DOMAIN = "ff-like-bot-px1w.onrender.com"
 WEBHOOK_URL = f"https://{DOMAIN}/webhook"
 
-# ------------------------------------
-# LOGGING
-# ------------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ------------------------------------
-# TELEGRAM COMMANDS
-# ------------------------------------
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Hello! 👋\n"
-        "Use /like <FF_ID> to get likes.\n"
-        "Example: /like 123456789"
-    )
-
+    await update.message.reply_text("Bot is online!")
 
 async def like(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("❌ Usage: /like <FF_ID>")
+        await update.message.reply_text("Usage: /like <FF_ID>")
         return
 
-    ff_id = context.args[0].strip()
+    ff_id = context.args[0]
 
-    await update.message.reply_text("⏳ Adding likes, wait...")
+    await update.message.reply_text("Processing...")
 
     try:
-        response = requests.get(
-            f"{CLOUDFLARE_URL}/like?id={ff_id}",
-            timeout=20
-        )
-        data = response.json()
+        res = requests.get(f"{CLOUDFLARE_URL}/like?id={ff_id}")
+        data = res.json()
 
         if data.get("status") == "success":
-            await update.message.reply_text(f"❤️ {data.get('likes',0)} Likes Added!")
+            await update.message.reply_text(f"Likes added: {data.get('likes',0)}")
         else:
-            await update.message.reply_text("❌ Failed to add likes.")
+            await update.message.reply_text("Failed to add likes")
 
-    except Exception as e:
-        logger.error(f"Like error: {e}")
-        await update.message.reply_text("❌ Server error.")
+    except:
+        await update.message.reply_text("Server error!")
 
-
-# ------------------------------------
-# FLASK SERVER
-# ------------------------------------
 app = Flask(__name__)
 application = Application.builder().token(BOT_TOKEN).build()
 
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("like", like))
 
-
-# TELEGRAM INIT
-async def init_telegram():
+async def init_bot():
     await application.initialize()
     await application.start()
     await application.bot.set_webhook(WEBHOOK_URL)
-    print("WEBHOOK ACTIVE →", WEBHOOK_URL)
 
-asyncio.run(init_telegram())   # ✔ CORRECT WAY
+asyncio.run(init_bot())
 
-
-# WEBHOOK ENDPOINT
-@app.route('/webhook', methods=['POST'])
+@app.route("/webhook", methods=["POST"])
 def webhook():
     update = Update.de_json(request.json, application.bot)
-
-    # ✔ RUN ASYNC TASK SAFELY
     asyncio.run(application.process_update(update))
-
     return jsonify({"ok": True})
 
-
-@app.route('/')
+@app.route("/")
 def home():
-    return "Bot Running With Webhook!"
+    return "Bot Running"
 
-
-# ------------------------------------
-# START SERVER
-# ------------------------------------
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    app.run(host="0.0.0.0", port=port)
+    print("Running on Render via Gunicorn")
     
