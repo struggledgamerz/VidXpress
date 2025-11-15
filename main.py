@@ -11,18 +11,14 @@ import os
 # ------------------------------------
 
 BOT_TOKEN = "7817163480:AAGuev86KtOHZh2UgvX0y6DVw-cQEK4TQn8"
-
-# ⚠️ YOUR CLOUDFLARE TUNNEL URL
 CLOUDFLARE_URL = "https://fails-earning-millions-informational.trycloudflare.com"
 
-DOMAIN = "ff-like-bot-px1w.onrender.com"   # YOUR RENDER URL
+DOMAIN = "ff-like-bot-px1w.onrender.com"
 WEBHOOK_URL = f"https://{DOMAIN}/webhook"
-
 
 # ------------------------------------
 # LOGGING
 # ------------------------------------
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -48,14 +44,10 @@ async def like(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Adding likes, wait...")
 
     try:
-        # ——————————————
-        # SEND REQUEST TO CLOUDLARE
-        # ——————————————
         response = requests.get(
             f"{CLOUDFLARE_URL}/like?id={ff_id}",
             timeout=20
         )
-
         data = response.json()
 
         if data.get("status") == "success":
@@ -69,9 +61,8 @@ async def like(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ------------------------------------
-# FLASK SERVER FOR WEBHOOK
+# FLASK SERVER
 # ------------------------------------
-
 app = Flask(__name__)
 application = Application.builder().token(BOT_TOKEN).build()
 
@@ -79,21 +70,24 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("like", like))
 
 
-# TELEGRAM INIT (WEBHOOK)
+# TELEGRAM INIT
 async def init_telegram():
     await application.initialize()
     await application.start()
     await application.bot.set_webhook(WEBHOOK_URL)
-    print("WEBHOOK SET TO:", WEBHOOK_URL)
+    print("WEBHOOK ACTIVE →", WEBHOOK_URL)
+
+asyncio.run(init_telegram())   # ✔ CORRECT WAY
 
 
-asyncio.get_event_loop().run_until_complete(init_telegram())
-
-
+# WEBHOOK ENDPOINT
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = Update.de_json(request.json, application.bot)
-    asyncio.get_event_loop().create_task(application.process_update(update))
+
+    # ✔ RUN ASYNC TASK SAFELY
+    asyncio.run(application.process_update(update))
+
     return jsonify({"ok": True})
 
 
@@ -108,3 +102,4 @@ def home():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
+    
