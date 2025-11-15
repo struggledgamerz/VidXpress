@@ -1,21 +1,25 @@
 import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-from flask import Flask
-from threading import Thread
+from flask import Flask, request, jsonify
 import requests
-import os
 import asyncio
+import threading
+import os
 
 BOT_TOKEN = "7817163480:AAGuev86KtOHZh2UgvX0y6DVw-cQEK4TQn8"
+
+DOMAIN = "ff-like-bot-px1w.onrender.com"
+WEBHOOK_URL = f"https://{DOMAIN}/webhook"
+
 CLOUDFLARE_URL = "https://fails-earning-millions-informational.trycloudflare.com"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------------------------
-# Telegram Bot Handlers
-# ---------------------------
+# --------------------
+# Telegram Handlers
+# --------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot is online!")
@@ -33,44 +37,59 @@ async def like(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = res.json()
 
         if data.get("status") == "success":
-            await update.message.reply_text(f"Likes added: {data.get('likes', 0)}")
+            await update.message.reply_text(f"Likes added: {data.get('likes',0)}")
         else:
             await update.message.reply_text("Failed to add likes")
 
     except Exception as e:
-        print(e)
         await update.message.reply_text("Server error!")
+        print(e)
 
-# ---------------------------
-# Telegram Bot (Polling)
-# ---------------------------
+# --------------------
+# Telegram App
+# --------------------
 
 application = Application.builder().token(BOT_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("like", like))
 
-def run_bot():
-    asyncio.run(application.run_polling())
-
-# ---------------------------
-# Flask Server (Render ke liye)
-# ---------------------------
+# --------------------
+# Flask App (Render)
+# --------------------
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Bot is running on Render using polling!"
+    return "Bot Running on Render"
 
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    try:
+        update = Update.de_json(request.json, application.bot)
+        asyncio.run(application.process_update(update))
+    except Exception as e:
+        print("Webhook error:", e)
+    return jsonify({"ok": True})
 
-# ---------------------------
-# Run both in two threads
-# ---------------------------
+# --------------------
+# Start Telegram webhook in background
+# --------------------
+
+async def set_webhook():
+    await application.initialize()
+    await application.bot.set_webhook(WEBHOOK_URL)
+    await application.start()
+    print("Webhook set:", WEBHOOK_URL)
+
+def run_telegram():
+    asyncio.run(set_webhook())
 
 if __name__ == "__main__":
-    Thread(target=run_bot).start()
-    Thread(target=run_flask).start()
-    
+    # Telegram bot thread
+    threading.Thread(target=run_telegram).start()
+
+    # Flask server for Render
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+            
