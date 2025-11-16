@@ -6,45 +6,36 @@ logging.basicConfig(level=logging.INFO)
 
 TOKEN = "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY"
 
-
 def start(update, context):
-    update.message.reply_text(
-        "🔥 Multi Downloader Active!\nSend any link (IG, FB, TikTok, X, Shorts, Moj, Josh...)"
-    )
-
+    update.message.reply_text("Send any reel / short / video link to download!")
 
 def download(update, context):
     url = update.message.text.strip()
 
-    update.message.reply_text("⏳ Processing your link...")
+    update.message.reply_text("⏳ Processing... Please wait.")
 
     try:
-        # UNIVERSAL SUPER API
-        api = "https://api.savee.io/api/download"
-        r = requests.get(api, params={"url": url}).json()
+        api_url = "https://savein.io/api/download"
+        data = {"url": url}
 
-        # If API failed
-        if "medias" not in r or len(r["medias"]) == 0:
-            update.message.reply_text("❌ Unable to download. Try another link.")
+        res = requests.post(api_url, json=data)
+        result = res.json()
+
+        if "medias" not in result:
+            update.message.reply_text("❌ Could not fetch. Maybe link is private or unsupported.")
             return
 
-        media = r["medias"][0]
+        media_url = result["medias"][0]["url"]
 
-        video_url = media.get("url")
-        if not video_url:
-            update.message.reply_text("❌ Failed to get video URL.")
-            return
-
-        # Send media
-        if media["type"] == "video":
-            update.message.reply_video(video_url)
+        # If video
+        if result["medias"][0]["type"] == "video":
+            update.message.reply_video(media_url)
         else:
-            update.message.reply_photo(video_url)
+            update.message.reply_photo(media_url)
 
     except Exception as e:
-        print("ERROR:", e)
-        update.message.reply_text("❌ Download failed. Maybe link is private.")
-
+        update.message.reply_text("❌ Failed to download. Try another link.")
+        print(e)
 
 def main():
     updater = Updater(TOKEN, use_context=True)
@@ -55,7 +46,6 @@ def main():
 
     updater.start_polling()
     updater.idle()
-
 
 if __name__ == "__main__":
     main()
