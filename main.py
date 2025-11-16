@@ -1,93 +1,47 @@
-import os
-import re
-import tempfile
-import asyncio
-from yt_dlp import YoutubeDL
-from telegram import Update, InputFile
+import logging
+import requests
+from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
-TOKEN = os.getenv("BOT_TOKEN")
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 
-URL_RE = re.compile(r"(https?://[^\s]+)")
+BOT_TOKEN = "7817163480:AAGuev86KtOHZh2UgvX0y6DVw-cQEK4TQn8"
 
-
-YDL_OPTS = {
-    "format": "bestvideo+bestaudio/best",
-    "merge_output_format": "mp4",
-    "noplaylist": True,
-    "quiet": True
-}
-
-
-async def download_video(url, folder):
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, lambda: _download(url, folder))
-
-
-def _download(url, folder):
-    with YoutubeDL({**YDL_OPTS, "outtmpl": f"{folder}/%(id)s.%(ext)s"}) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        return filename
-
+# Simple downloader using public API
+def download_video(url):
+    try:
+        api = f"https://api.sssgram.com/instagram?url={url}"
+        r = requests.get(api).json()
+        return r["links"][0]["link"]
+    except:
+        return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Send any Instagram / YouTube / TikTok / Facebook / Twitter link!")
-
+    await update.message.reply_text("Send any valid video link (YT, IG, FB, Reels) to download!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message.text
-    urls = URL_RE.findall(message)
+    url = update.message.text
 
-    if not urls:
-        await update.message.reply_text("Please send a valid video link.")
+    await update.message.reply_text("Downloading... Please wait 🔄")
+
+    link = download_video(url)
+
+    if not link:
+        await update.message.reply_text("❌ Failed to download. Invalid link or API error.")
         return
 
-    url = urls[0]
-    processing_msg = await update.message.reply_text("Downloading...")
-
-    with tempfile.TemporaryDirectory() as tmp:
-        try:
-            filepath = await download_video(url, tmp)
-        except Exception as e:
-            await processing_msg.edit_text(f"Error: {e}")
-            return
-
-        size = os.path.getsize(filepath)
-        if size > 48 * 1024 * 1024:
-            await processing_msg.edit_text("File too large for Telegram (limit ~50MB).")
-            return
-
-        await processing_msg.edit_text("Uploading...")
-
-        try:
-            await update.message.reply_document(
-                InputFile(filepath, filename=os.path.basename(filepath))
-            )
-        except Exception as e:
-            await processing_msg.edit_text(f"Upload error: {e}")
-        else:
-            await processing_msg.delete()
-
-
-async def error_handler(update, context):
-    print("Error:", context.error)
-
+    await update.message.reply_video(video=link)
 
 def main():
-    if not TOKEN:
-        print("ERROR: TG_BOT_TOKEN not set!")
-        return
-
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(error_handler)
 
-    print("Bot running…")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
