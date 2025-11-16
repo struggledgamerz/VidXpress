@@ -1,57 +1,144 @@
 import logging
 import requests
-from PIL import Image
-import io
+import re
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 
 logging.basicConfig(level=logging.INFO)
 
-TOKEN = "7817163480:AAGuev86KtOHZh2UgvX0y6DVw-cQEK4TQn8"
-
-
-# Replacement for imghdr → PIL based image type detection
-def detect_image_type(file_bytes):
-    try:
-        img = Image.open(io.BytesIO(file_bytes))
-        return img.format.lower()
-    except:
-        return None
+TOKEN = "7817163480:AAGuev86KtOHZh2UgvX0y6DVw-cQEK4TQn8"    # ← change this
 
 
 def start(update, context):
-    update.message.reply_text("Send any Instagram / FB / Reels link to download!")
+    update.message.reply_text(
+        "🔥 Multi Downloader Bot Active!\n\n"
+        "Send any link:\n"
+        "• Instagram\n"
+        "• Facebook\n"
+        "• YouTube Shorts\n"
+        "• Twitter (X)\n"
+        "• TikTok\n"
+        "• Moj / Josh / Pinterest\n"
+        "\nBot will auto-detect and download!"
+    )
 
 
+# ---------- PLATFORM DETECTORS ----------
+def detect_platform(url):
+
+    if "instagram.com" in url:
+        return "instagram"
+
+    if "fb.watch" in url or "facebook.com" in url:
+        return "facebook"
+
+    if "tiktok.com" in url:
+        return "tiktok"
+
+    if "twitter.com" in url or "x.com" in url:
+        return "twitter"
+
+    if "youtube.com/shorts" in url or "youtu.be" in url:
+        return "youtube"
+
+    if "moj" in url or "josh" in url or "sharechat" in url:
+        return "indian"
+
+    if "pin.it" in url or "pinterest.com" in url:
+        return "pinterest"
+
+    return None
+
+
+
+# ---------- PLATFORM DOWNLOADER FUNCTIONS ----------
+def download_instagram(url):
+    api = "https://igram.world/api/instagram"
+    r = requests.post(api, json={"url": url}).json()
+    return r["result"]["media"][0]["url"]
+
+
+def download_facebook(url):
+    api = "https://v3.letdown.cc/api/facebook"
+    r = requests.get(api, params={"url": url}).json()
+    return r["url"]
+
+
+def download_tiktok(url):
+    api = "https://www.tikwm.com/api/"
+    r = requests.post(api, data={"url": url}).json()
+    return r["data"]["play"]
+
+
+def download_youtube(url):
+    api = "https://ytshorts.savetube.me/api/download"
+    r = requests.get(api, params={"url": url}).json()
+    return r["url"]
+
+
+def download_twitter(url):
+    api = "https://twdown.net/download.php?URL=" + url
+    r = requests.get(api).text
+    video_url = re.search(r'https://.*?\.mp4', r).group(0)
+    return video_url
+
+
+def download_indian(url):
+    api = "https://api.scraperapi.com/tiktok?api_key=free&url=" + url
+    r = requests.get(api).json()
+    return r["video"]
+
+
+def download_pinterest(url):
+    api = "https://pinterestdownloader.com/download.php?url=" + url
+    r = requests.get(api).text
+    match = re.search(r'https://.*?\.mp4', r)
+    return match.group(0)
+
+
+# ---------- MAIN DOWNLOAD HANDLER ----------
 def download(update, context):
-    import re
     url = update.message.text.strip()
 
-    INSTAGRAM_REGEX = r"(https?://)?(www\.)?(instagram\.com|www\.instagram\.com)/(reel|p|reels)/[A-Za-z0-9_\-]+/?"
+    platform = detect_platform(url)
 
-    if not re.match(INSTAGRAM_REGEX, url):
-        update.message.reply_text("❌ Invalid Instagram link. Please send a valid reel/post URL.")
+    if not platform:
+        update.message.reply_text("❌ Unsupported or invalid link!")
         return
 
-    update.message.reply_text("⏳ Downloading... Please wait 🔄")
+    update.message.reply_text(f"⏳ Downloading from {platform.title()}...")
 
     try:
-        api_url = "https://igram.world/api/instagram"
-        payload = {"url": url}
+        if platform == "instagram":
+            video_url = download_instagram(url)
 
-        r = requests.post(api_url, json=payload).json()
+        elif platform == "facebook":
+            video_url = download_facebook(url)
 
-        # Validate API response
-        if "result" not in r or "media" not in r["result"]:
-            update.message.reply_text("❌ API error. Link invalid or private.")
+        elif platform == "tiktok":
+            video_url = download_tiktok(url)
+
+        elif platform == "twitter":
+            video_url = download_twitter(url)
+
+        elif platform == "youtube":
+            video_url = download_youtube(url)
+
+        elif platform == "indian":
+            video_url = download_indian(url)
+
+        elif platform == "pinterest":
+            video_url = download_pinterest(url)
+
+        else:
+            update.message.reply_text("❌ Not supported.")
             return
-
-        video_url = r["result"]["media"][0]["url"]
 
         update.message.reply_video(video_url)
 
     except Exception as e:
-        update.message.reply_text("❌ Failed to download. The link may be private or unsupported.")
-        print("Error:", e)
+        print(e)
+        update.message.reply_text("❌ Failed! Link may be private or server issue.")
+
 
 
 def main():
@@ -65,6 +152,7 @@ def main():
     updater.idle()
 
 
+
 if __name__ == "__main__":
     main()
-        
+    
