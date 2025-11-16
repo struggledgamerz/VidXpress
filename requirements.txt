@@ -1,2 +1,2 @@
-python-telegram-bot[asyncio]==20.7
-yt-dlp
+pip install python-telegram-bot==20.7
+pip install requests
