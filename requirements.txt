@@ -1,1 +1,4 @@
+python-telegram-bot[asyncio]==20.7
+yt-dlp
+aiofiles
 
