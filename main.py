@@ -22,25 +22,33 @@ def start(update, context):
 
 
 def download(update, context):
+    import re
     url = update.message.text.strip()
 
-    update.message.reply_text("Downloading... Please wait 🔄")
+    INSTAGRAM_REGEX = r"(https?://)?(www\.)?(instagram\.com|www\.instagram\.com)/(reel|p|reels)/[A-Za-z0-9_\-]+/?"
+
+    # Validate link
+    if not re.match(INSTAGRAM_REGEX, url):
+        update.message.reply_text("❌ Invalid Instagram link. Please send a valid reel/post URL.")
+        return
+    
+    update.message.reply_text("⏳ Downloading... Please wait 🔄")
 
     try:
-        # Public IG downloader API
-        api_url = f"https://api.sssgram.com/instagram?url={url}"
-        r = requests.get(api_url).json()
+        # NEW Latest Working API
+        api_url = "https://igram.world/api/instagram"
+        payload = {"url": url}
 
-        video_url = r["links"][0]["link"]
+        r = requests.post(api_url, json=payload).json()
+
+        # Extract downloadable link
+        video_url = r["result"]["media"][0]["url"]
+
+        update.message.reply_video(video_url)
 
     except Exception as e:
-        update.message.reply_text("❌ Failed to download (invalid link or API error).")
-        return
-
-    try:
-        update.message.reply_video(video=video_url)
-    except:
-        update.message.reply_text("❌ Telegram does not support this media format.")
+        update.message.reply_text("❌ Failed to download. The link may be private or unsupported.")
+        print(e)
 
 
 def main():
