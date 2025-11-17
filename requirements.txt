@@ -1,5 +1,5 @@
-python-telegram-bot==20.7
+python-telegram-bot[webhooks]==20.7
 yt-dlp
 requests
 js2py
-gunicorn # Added for webhook deployment
+gunicorn
