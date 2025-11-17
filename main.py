@@ -1,86 +1,64 @@
 import logging
-import requests
+import subprocess
+import os
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
-from urllib.parse import urlparse
-
-logging.basicConfig(level=logging.INFO)
+from telegram import ChatAction
 
 TOKEN = "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY"
 
+logging.basicConfig(level=logging.INFO)
+
+COOKIES_PATH = "cookies/instagram.txt"  # optional
+
+
 def start(update, context):
-    update.message.reply_text("📥 Send any link (Instagram, YouTube, TikTok, Facebook, etc.)")
-
-def download_instagram(url):
-    try:
-        r = requests.get(f"https://api.geniuslink.workers.dev/instagram?url={url}").json()
-        return r.get("url")
-    except:
-        return None
-
-def download_youtube(url):
-    try:
-        r = requests.get(f"https://api.geniuslink.workers.dev/youtube?url={url}").json()
-        return r.get("url")
-    except:
-        return None
-
-def download_tiktok(url):
-    try:
-        r = requests.get(f"https://api.geniuslink.workers.dev/tiktok?url={url}").json()
-        return r.get("url")
-    except:
-        return None
-
-def download_facebook(url):
-    try:
-        r = requests.get(f"https://api.geniuslink.workers.dev/facebook?url={url}").json()
-        return r.get("url")
-    except:
-        return None
-
-def download_twitter(url):
-    try:
-        r = requests.get(f"https://api.geniuslink.workers.dev/twitter?url={url}").json()
-        return r.get("url")
-    except:
-        return None
-
-
-def resolve_media(url):
-    hostname = (urlparse(url).hostname or "").lower()
-
-    if "instagram" in hostname:
-        return download_instagram(url)
-
-    if "youtube" in hostname or "youtu.be" in hostname:
-        return download_youtube(url)
-
-    if "tiktok" in hostname:
-        return download_tiktok(url)
-
-    if "facebook" in hostname:
-        return download_facebook(url)
-
-    if "twitter" in hostname or "x.com" in hostname:
-        return download_twitter(url)
-
-    return None
+    update.message.reply_text("Send me any link — YouTube, TikTok, Instagram, FB, Twitter…\n\nDownloading using YT-DLP 🔥")
 
 
 def download(update, context):
     url = update.message.text.strip()
-    update.message.reply_text("⏳ Processing... Please wait 🔄")
 
-    media_url = resolve_media(url)
-
-    if not media_url:
-        update.message.reply_text("❌ Invalid or unsupported link!")
-        return
+    update.message.reply_chat_action(ChatAction.TYPING)
+    update.message.reply_text("Downloading… Please wait 🔄")
 
     try:
-        update.message.reply_video(media_url)
-    except:
-        update.message.reply_text("❌ Failed to send the video. Try another link.")
+        output_dir = "downloads"
+        os.makedirs(output_dir, exist_ok=True)
+
+        output_path = os.path.join(output_dir, "%(title)s.%(ext)s")
+
+        cmd = ["yt-dlp", "-o", output_path, url]
+
+        # Add Instagram cookies if file exists
+        if "instagram.com" in url.lower() and os.path.exists(COOKIES_PATH):
+            cmd += ["--cookies", COOKIES_PATH]
+
+        logging.info(f"Running command: {' '.join(cmd)}")
+
+        subprocess.run(cmd, check=True)
+
+        # Find downloaded file
+        files = os.listdir(output_dir)
+        files = sorted([os.path.join(output_dir, f) for f in files], key=os.path.getmtime)
+
+        if not files:
+            update.message.reply_text("❌ Failed to download file.")
+            return
+
+        latest_file = files[-1]
+
+        # Send file
+        with open(latest_file, "rb") as f:
+            if latest_file.endswith((".mp4", ".mov", ".webm")):
+                update.message.reply_video(f)
+            else:
+                update.message.reply_document(f)
+
+        os.remove(latest_file)
+
+    except Exception as e:
+        logging.error(e)
+        update.message.reply_text("❌ Failed. This platform may not be supported.")
 
 
 def main():
@@ -92,6 +70,7 @@ def main():
 
     updater.start_polling()
     updater.idle()
+
 
 if __name__ == "__main__":
     main()
