@@ -183,25 +183,37 @@ def telegram_webhook():
     try:
         update = Update.de_json(data=request.json, bot=application.bot)
         
-        # Define the async processing function
         async def process_update_async():
             await application.process_update(update)
 
-        # --- CRITICAL FIX: Manual Event Loop Management ---
-        # 1. Create a new event loop for this request
+        # --- FINAL CRITICAL FIX: Robust Manual Event Loop Management with Cleanup ---
         loop = asyncio.new_event_loop()
-        # 2. Set it as the current loop for the synchronous thread
         asyncio.set_event_loop(loop)
         
-        # 3. Run the async function until completion
-        loop.run_until_complete(process_update_async())
-        
-        # 4. Explicitly close the loop to clean up all resources (fixes the RuntimeError)
-        loop.close()
-        # -------------------------------------------------
+        try:
+            # 1. Run the async function until completion
+            loop.run_until_complete(process_update_async())
+            
+        except Exception as e:
+            # Re-raise exceptions to be caught by the outer block
+            raise e
+            
+        finally:
+            # 2. Cleanup outstanding tasks (MANDATORY for reliable closure in Gunicorn)
+            pending = asyncio.all_tasks(loop=loop)
+            if pending:
+                # Cancel and gather all pending tasks (graceful shutdown)
+                # We ignore exceptions here as we are cleaning up
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            
+            # 3. Close the loop cleanly
+            loop.stop()
+            loop.close()
+        # ---------------------------------------------------------------------------
         
     except Exception as e:
         logger.error(f"Error processing update: {e}", exc_info=True)
+        # Always return 200 OK to Telegram to prevent repeated attempts, even on error
         return Response("Update processed with error", status=HTTPStatus.OK) 
         
     return Response("OK", status=HTTPStatus.OK)
