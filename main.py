@@ -183,13 +183,22 @@ def telegram_webhook():
     try:
         update = Update.de_json(data=request.json, bot=application.bot)
         
-        # Define and run the async processing function synchronously
+        # Define the async processing function
         async def process_update_async():
-            # Process update manually in the synchronous Flask thread
             await application.process_update(update)
 
-        # Run the async function using asyncio.run()
-        asyncio.run(process_update_async())
+        # --- CRITICAL FIX: Manual Event Loop Management ---
+        # 1. Create a new event loop for this request
+        loop = asyncio.new_event_loop()
+        # 2. Set it as the current loop for the synchronous thread
+        asyncio.set_event_loop(loop)
+        
+        # 3. Run the async function until completion
+        loop.run_until_complete(process_update_async())
+        
+        # 4. Explicitly close the loop to clean up all resources (fixes the RuntimeError)
+        loop.close()
+        # -------------------------------------------------
         
     except Exception as e:
         logger.error(f"Error processing update: {e}", exc_info=True)
@@ -223,7 +232,6 @@ async def setup_webhook():
 if WEBHOOK_BASE_URL and WEBHOOK_BASE_URL != "https://your-app-name.example.com":
     try:
         logger.info("Starting bot configuration...")
-        # CRITICAL FIX: Run the setup, which now avoids the problematic application.start()
         asyncio.run(setup_webhook())
         logger.info("Bot configuration complete and ready for Gunicorn.")
     except Exception as e:
