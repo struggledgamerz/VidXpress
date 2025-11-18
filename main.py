@@ -3,7 +3,7 @@ import logging
 import shutil
 import json
 import asyncio 
-# FIX: Removed 'escape' from import as it was causing ImportError on new Flask versions
+# Removed 'escape' as it's not needed and caused ImportError
 from flask import Flask, request, Response 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
@@ -25,11 +25,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Initialize Flask App
+# 1. Initialize Flask App (Gunicorn will look for this object)
 app_flask = Flask(__name__)
 
-# Initialize Telegram Bot Application
-# We build it here, but initialization (start/initialize) is handled later in an async context
+# 2. Initialize Telegram Bot Application
 application = ApplicationBuilder().token(TOKEN).build()
 
 # --- PRIVACY POLICY CONTENT (Embedded HTML) ---
@@ -161,7 +160,7 @@ async def downloader(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Failed to clean up temporary directory {temp}: {e}")
 
-# --- FLASK ENDPOINTS ---
+# --- FLASK ENDPOINTS (Used by Gunicorn) ---
 
 @app_flask.route('/')
 def index():
@@ -186,60 +185,51 @@ def telegram_webhook():
         
         # Define and run the async processing function synchronously
         async def process_update_async():
-            # NOTE: We use application.process_update() when running an external server
+            # Process update manually in the synchronous Flask thread
             await application.process_update(update)
 
         # Run the async function using asyncio.run()
-        # This will block until the update is processed
         asyncio.run(process_update_async())
         
     except Exception as e:
-        # Log the error, but still return 200 OK to Telegram to avoid repeated retries
         logger.error(f"Error processing update: {e}", exc_info=True)
         return Response("Update processed with error", status=HTTPStatus.OK) 
         
     return Response("OK", status=HTTPStatus.OK)
 
-# --- MAIN EXECUTION ---
+# --- BOT INITIALIZATION (Runs on Gunicorn load) ---
 
-def main():
-    # 1. Add Handlers (Sync Operation)
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, downloader))
+# 1. Add Handlers (Sync Operation - Runs on Gunicorn import)
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, downloader))
 
-    # 2. Define the async setup function for bot initialization
-    async def setup_bot_async():
-        # FIX: Explicitly initialize the Application before starting/setting webhook
-        await application.initialize() 
-        # CRITICAL FIX: Application must be explicitly started when manually managing webhooks
-        await application.start()
-        
-        # 3. Set the Webhook on Telegram (Async Operation)
-        try:
-            # We use set_webhook because we are controlling the server (Flask)
-            await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
-            logger.info(f"Webhook successfully set to: {WEBHOOK_URL}")
-        except Exception as e:
-            logger.error(f"Failed to set webhook URL! Error: {e}")
-            raise # Stop if webhook setup fails
-
-    # Run the async setup function synchronously before starting the Flask server
+# 2. Define the async setup function for bot initialization
+async def setup_webhook():
+    """Initializes PTB Application and sets the webhook in Manual Mode."""
+    # Mandatory initialization step (REQUIRED)
+    await application.initialize() 
+    
+    # NOTE: We DO NOT call await application.start() in manual mode for external servers.
+    
+    # 3. Set the Webhook on Telegram (Async Operation)
     try:
-        asyncio.run(setup_bot_async())
+        await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
+        logger.info(f"Webhook successfully set to: {WEBHOOK_URL}")
     except Exception as e:
-        # This will catch the error if setup_bot_async failed
-        logger.critical(f"Bot setup failed. Cannot start server: {e}")
-        return
+        logger.error(f"Failed to set webhook URL! Error: {e}")
+        raise # Stop if webhook setup fails
 
-    # 4. Start the Flask Server (Sync Operation)
-    logger.info(f"Starting Flask server on port {PORT}...")
-    # NOTE: Flask will keep the thread alive, allowing the bot to receive webhooks
-    app_flask.run(host='0.0.0.0', port=PORT)
+# 4. Run the async setup function synchronously before Gunicorn starts serving.
+if WEBHOOK_BASE_URL and WEBHOOK_BASE_URL != "https://your-app-name.example.com":
+    try:
+        logger.info("Starting bot configuration...")
+        # CRITICAL FIX: Run the setup, which now avoids the problematic application.start()
+        asyncio.run(setup_webhook())
+        logger.info("Bot configuration complete and ready for Gunicorn.")
+    except Exception as e:
+        logger.critical(f"Bot setup failed during initialization: {e}")
+        # Allow Gunicorn to start, but the bot might not work due to failed webhook set.
+else:
+    logger.error("!!! CRITICAL ERROR: WEBHOOK_BASE_URL not set. Webhook setup skipped. Please check your Render environment variables.")
 
-
-if __name__ == "__main__":
-    if not WEBHOOK_BASE_URL or WEBHOOK_BASE_URL == "https://your-app-name.example.com":
-        logger.error("!!! CRITICAL ERROR: WEBHOOK_BASE_URL not set. Please set WEBHOOK_BASE_URL to deploy.")
-        main() 
-    else:
-        main()
+# --- END OF FILE ---
