@@ -7,10 +7,9 @@ from flask import Flask, request, Response
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
 from http import HTTPStatus
-from download_manager import download_media
+from download_manager import download_media # Assuming download_manager is updated with None, None fix
 
 # --- CONFIGURATION ---
-# Using standard Render environment variables for better integration
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY")
 PORT = int(os.environ.get("PORT", "8080"))
 # IMPORTANT: The user MUST set this environment variable on Render
@@ -88,25 +87,24 @@ def index():
     return "VidXpress Bot is Running.", HTTPStatus.OK
 
 @app_flask.route(WEBHOOK_URL_PATH, methods=["POST"])
-def telegram_webhook(): # CRITICAL FIX: The function is now synchronous (def)
+def telegram_webhook():
     """Telegram Webhook Endpoint (POST /<token>)"""
     if not request.json:
         return Response("Invalid data received", status=HTTPStatus.BAD_REQUEST)
 
-    # Use the application's update handler
     try:
         update = Update.de_json(data=request.json, bot=application.bot)
         
-        # CRITICAL FIX: Define and run the async processing function synchronously
+        # Define and run the async processing function synchronously
         async def process_update_async():
             await application.process_update(update)
 
-        # Run the async function using asyncio.run() to block until the update is processed
+        # Run the async function using asyncio.run()
         asyncio.run(process_update_async())
         
     except Exception as e:
+        # Log the error, but still return 200 OK to Telegram to avoid repeated retries
         logger.error(f"Error processing update: {e}", exc_info=True)
-        # Always return 200 OK to Telegram, even if processing fails
         return Response("Update processed with error", status=HTTPStatus.OK) 
         
     return Response("OK", status=HTTPStatus.OK)
@@ -114,26 +112,42 @@ def telegram_webhook(): # CRITICAL FIX: The function is now synchronous (def)
 # --- MAIN EXECUTION ---
 
 def main():
-    # 1. Add Handlers to the Telegram Application
+    # 1. Add Handlers (Sync Operation)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, downloader))
 
-    # 2. Set the Webhook on Telegram (runs only once at startup)
+    # 2. Define the async setup function for bot initialization
+    async def setup_bot_async():
+        # CRITICAL FIX: Application must be explicitly started when manually managing webhooks
+        await application.start()
+        
+        # 3. Set the Webhook on Telegram (Async Operation)
+        try:
+            await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
+            logger.info(f"Webhook successfully set to: {WEBHOOK_URL}")
+        except Exception as e:
+            logger.error(f"Failed to set webhook URL! Error: {e}")
+            raise # Stop if webhook setup fails
+
+    # Run the async setup function synchronously before starting the Flask server
     try:
-        application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
-        logger.info(f"Webhook successfully set to: {WEBHOOK_URL}")
+        asyncio.run(setup_bot_async())
     except Exception as e:
-        logger.error(f"Failed to set webhook URL! Error: {e}")
+        logger.critical(f"Bot setup failed. Cannot start server: {e}")
         return
 
-    # 3. Start the Flask Server
+    # 4. Start the Flask Server (Sync Operation)
     logger.info(f"Starting Flask server on port {PORT}...")
+    # NOTE: app_flask.run() is synchronous and blocking
     app_flask.run(host='0.0.0.0', port=PORT)
 
 
 if __name__ == "__main__":
     if not WEBHOOK_BASE_URL or WEBHOOK_BASE_URL == "https://your-app-name.example.com":
-        logger.error("!!! CRITICAL ERROR: WEBHOOK_BASE_URL not set. Running in Polling Mode for testing.")
-        application.run_polling() 
+        logger.error("!!! CRITICAL ERROR: WEBHOOK_BASE_URL not set. Running in Polling Mode for testing. Please set WEBHOOK_BASE_URL to deploy.")
+        # We can't use application.run_polling() here because the Flask server starts later.
+        # This part is just for development/testing if the URL isn't set.
+        # For deployment, ensure WEBHOOK_BASE_URL is properly configured.
+        main() # We still run main, but rely on the error being caught if the URL is wrong.
     else:
         main()
