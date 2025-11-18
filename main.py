@@ -2,12 +2,12 @@ import os
 import logging
 import shutil
 import json
-import asyncio # Imported to bridge synchronous Flask with asynchronous Telegram code
-from flask import Flask, request, Response 
+import asyncio 
+from flask import Flask, request, Response, escape 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
 from http import HTTPStatus
-from download_manager import download_media # Assuming download_manager is updated with None, None fix
+from download_manager import download_media 
 
 # --- CONFIGURATION ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY")
@@ -29,6 +29,85 @@ app_flask = Flask(__name__)
 
 # Initialize Telegram Bot Application
 application = ApplicationBuilder().token(TOKEN).build()
+
+# --- PRIVACY POLICY CONTENT (Embedded HTML) ---
+
+PRIVACY_POLICY_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VidXpress Bot Privacy Policy</title>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; max-width: 800px; margin: 40px auto; padding: 20px; background-color: #f4f4f4; color: #333; }
+        h1, h2 { color: #007bff; }
+        .container { background-color: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+        th { background-color: #f8f8f8; }
+        code { background-color: #eee; padding: 2px 4px; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Privacy Policy for VidXpress Bot</h1>
+        <p>This Privacy Policy explains how we handle the information you provide while using our service.</p>
+
+        <h2>1. Data Collection and Usage</h2>
+        <p>We collect the following types of information, which are necessary for the bot's operation:</p>
+        
+        <table>
+            <thead>
+                <tr>
+                    <th>Type of Data</th>
+                    <th>Purpose</th>
+                    <th>Storage Duration</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Telegram User ID (UID)</strong></td>
+                    <td>To identify you as a unique user.</td>
+                    <td>Permanently (as long as you use the Bot)</td>
+                </tr>
+                <tr>
+                    <td><strong>Chat ID</strong></td>
+                    <td>To send media and replies back to the correct chat.</td>
+                    <td>Permanently (as long as you use the Bot)</td>
+                </tr>
+                <tr>
+                    <td><strong>User-Provided URLs</strong></td>
+                    <td>To fetch and download the requested media.</td>
+                    <td>Only during the processing of the request</td>
+                </tr>
+                <tr>
+                    <td><strong>Temporary Media Files</strong></td>
+                    <td>The downloaded video/photo is stored locally on the server.</td>
+                    <td><strong>Immediately deleted</strong> after the media is sent to you.</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>2. Information Sharing and Disclosure</h2>
+        <p>We do not share, sell, rent, or trade your personal information (User ID, Chat ID, or URLs) with third parties.</p>
+        <p><strong>Third-Party Services:</strong> The Bot uses <code>yt-dlp</code> and related Python libraries to access the URLs you provide. These services are used only for the purpose of downloading the requested media.</p>
+
+        <h2>3. Data Storage and Security</h2>
+        <ul>
+            <li>**Permanent Data:** Your User ID and Chat ID are handled securely by Telegram.</li>
+            <li>**Temporary Data:** Downloaded media files are stored only in a temporary directory on the server and are <strong>deleted immediately</strong> upon successful transmission or failure. The server does not maintain any permanent logs of downloaded media or URLs.</li>
+        </ul>
+
+        <h2>4. Consent</h2>
+        <p>By using the VidXpress Bot, you consent to this Privacy Policy.</p>
+
+        <h2>5. Contact Information</h2>
+        <p>If you have any questions about this Privacy Policy, please contact the bot developer.</p>
+    </div>
+</body>
+</html>
+"""
 
 # --- HANDLERS ---
 
@@ -58,11 +137,12 @@ async def downloader(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # NOTE: Using 'with open' is crucial for resource management
         with open(file_path, "rb") as video_file:
             try:
+                # Use os.path.basename(file_path) for cleaner file name when sending
                 await update.message.reply_video(video=video_file, caption="Downloaded via VidXpress Bot")
             except Exception as e:
                 logger.warning(f"Failed to send as video: {e}. Trying as document.")
                 video_file.seek(0)
-                await update.message.reply_document(document=video_file, filename=os.path.basename(file_path))
+                await update.message.reply_document(document=video_file, filename=os.path.basename(file_path), caption="Downloaded via VidXpress Bot (Sent as Document)")
 
         await update.message.reply_text("✔ Download complete!")
 
@@ -85,6 +165,13 @@ async def downloader(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def index():
     """Health Check Endpoint for Uptime Robot (GET /)"""
     return "VidXpress Bot is Running.", HTTPStatus.OK
+
+@app_flask.route('/privacy')
+def privacy_policy():
+    """Endpoint to display the Bot's Privacy Policy."""
+    # Serve the hardcoded HTML policy
+    return Response(PRIVACY_POLICY_HTML, mimetype='text/html')
+
 
 @app_flask.route(WEBHOOK_URL_PATH, methods=["POST"])
 def telegram_webhook():
@@ -138,16 +225,14 @@ def main():
 
     # 4. Start the Flask Server (Sync Operation)
     logger.info(f"Starting Flask server on port {PORT}...")
-    # NOTE: app_flask.run() is synchronous and blocking
     app_flask.run(host='0.0.0.0', port=PORT)
 
 
 if __name__ == "__main__":
     if not WEBHOOK_BASE_URL or WEBHOOK_BASE_URL == "https://your-app-name.example.com":
-        logger.error("!!! CRITICAL ERROR: WEBHOOK_BASE_URL not set. Running in Polling Mode for testing. Please set WEBHOOK_BASE_URL to deploy.")
-        # We can't use application.run_polling() here because the Flask server starts later.
-        # This part is just for development/testing if the URL isn't set.
-        # For deployment, ensure WEBHOOK_BASE_URL is properly configured.
-        main() # We still run main, but rely on the error being caught if the URL is wrong.
+        logger.error("!!! CRITICAL ERROR: WEBHOOK_BASE_URL not set. Please set WEBHOOK_BASE_URL to deploy.")
+        # If running locally without a webhook, you'd typically use run_polling().
+        # For this deployment model, we assume webhook is necessary.
+        main() 
     else:
         main()
