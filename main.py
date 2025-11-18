@@ -3,7 +3,8 @@ import logging
 import shutil
 import json
 import asyncio 
-from flask import Flask, request, Response, escape 
+# FIX: Removed 'escape' from import as it's no longer directly available in Flask >= 3.x
+from flask import Flask, request, Response 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
 from http import HTTPStatus
@@ -52,7 +53,7 @@ PRIVACY_POLICY_HTML = """
 <body>
     <div class="container">
         <h1>Privacy Policy for VidXpress Bot</h1>
-        <p>This Privacy Policy explains how we handle the information you provide while using our service.</p>
+        <p>This Privacy Policy explains how VidXpress Bot ("the Bot," "we," "us") handles the information you provide while using our service.</p>
 
         <h2>1. Data Collection and Usage</h2>
         <p>We collect the following types of information, which are necessary for the bot's operation:</p>
@@ -231,8 +232,6 @@ def main():
 if __name__ == "__main__":
     if not WEBHOOK_BASE_URL or WEBHOOK_BASE_URL == "https://your-app-name.example.com":
         logger.error("!!! CRITICAL ERROR: WEBHOOK_BASE_URL not set. Please set WEBHOOK_BASE_URL to deploy.")
-        # If running locally without a webhook, you'd typically use run_polling().
-        # For this deployment model, we assume webhook is necessary.
         main() 
     else:
         main()
