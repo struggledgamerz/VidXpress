@@ -3,7 +3,7 @@ import logging
 import shutil
 import json
 import asyncio 
-# FIX: Removed 'escape' from import as it's no longer directly available in Flask >= 3.x
+# FIX: Removed 'escape' from import as it was causing ImportError on new Flask versions
 from flask import Flask, request, Response 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 app_flask = Flask(__name__)
 
 # Initialize Telegram Bot Application
+# We build it here, but initialization (start/initialize) is handled later in an async context
 application = ApplicationBuilder().token(TOKEN).build()
 
 # --- PRIVACY POLICY CONTENT (Embedded HTML) ---
@@ -185,9 +186,11 @@ def telegram_webhook():
         
         # Define and run the async processing function synchronously
         async def process_update_async():
+            # NOTE: We use application.process_update() when running an external server
             await application.process_update(update)
 
         # Run the async function using asyncio.run()
+        # This will block until the update is processed
         asyncio.run(process_update_async())
         
     except Exception as e:
@@ -206,11 +209,14 @@ def main():
 
     # 2. Define the async setup function for bot initialization
     async def setup_bot_async():
+        # FIX: Explicitly initialize the Application before starting/setting webhook
+        await application.initialize() 
         # CRITICAL FIX: Application must be explicitly started when manually managing webhooks
         await application.start()
         
         # 3. Set the Webhook on Telegram (Async Operation)
         try:
+            # We use set_webhook because we are controlling the server (Flask)
             await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
             logger.info(f"Webhook successfully set to: {WEBHOOK_URL}")
         except Exception as e:
@@ -221,11 +227,13 @@ def main():
     try:
         asyncio.run(setup_bot_async())
     except Exception as e:
+        # This will catch the error if setup_bot_async failed
         logger.critical(f"Bot setup failed. Cannot start server: {e}")
         return
 
     # 4. Start the Flask Server (Sync Operation)
     logger.info(f"Starting Flask server on port {PORT}...")
+    # NOTE: Flask will keep the thread alive, allowing the bot to receive webhooks
     app_flask.run(host='0.0.0.0', port=PORT)
 
 
