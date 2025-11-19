@@ -1,6 +1,7 @@
 # CRITICAL FIX: Gevent monkey-patching MUST happen before any
 # I/O libraries (like httpx, which PTB uses) are imported.
-# This prevents the "RuntimeError: Event loop is closed" error.
+# This prevents the "RuntimeError: Event loop is closed" error
+# and is necessary for gevent workers to function correctly with asyncio code.
 from gevent import monkey
 monkey.patch_all()
 
@@ -27,16 +28,18 @@ logging.basicConfig(
 )
 # Suppress noisy library logs (optional but helpful)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.INFO) # Keep telegram logs useful
 
 # Read token and webhook URL from environment variables
-# NOTE: Replace these with your actual environment variable names
+# NOTE: Make sure these environment variables are correctly set in your deployment configuration.
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://your-app-name.onrender.com")
 
-# Initialize the bot Application
+# Initialize the bot Application globally
 application = (
     Application.builder()
     .token(TOKEN)
+    .concurrent_updates(True) # Use concurrent updates for better performance in a web environment
     .build()
 )
 
@@ -44,30 +47,38 @@ application = (
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message on /start."""
-    await update.message.reply_text(
-        "Hello! Send me a link to download content.",
-        parse_mode=ParseMode.MARKDOWN_V2
-    )
+    # Ensure the update object and message are present before replying
+    if update.message:
+        await update.message.reply_text(
+            "Hello! Send me a link to download content.",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
 
 async def downloader(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles the user's link, sends a 'wait' message, and simulates the download."""
-    # This is the line that was failing due to the event loop issue
-    # The monkey.patch_all() at the top should resolve this.
+    if not update.message:
+        return
+
     try:
+        # Acknowledge receipt of the link immediately
         await update.message.reply_text("⏳ Downloading... Please wait.")
 
-        # Simulate your actual yt-dlp/download logic here
+        # --- ACTUAL DOWNLOAD LOGIC WITH YT-DLP GOES HERE ---
         link = update.message.text
-        # Example of where your long-running or blocking download would go
-        # If this is blocking, you should consider using anyio.to_thread.run_sync()
-        # if using the pure async application builder, but since we are monkey-patching,
-        # standard blocking I/O should be okay (though not ideal).
+        logging.info(f"Received link for download: {link}")
         
-        await update.message.reply_text(f"✅ Download complete for: `{link}`")
+        # NOTE: Your actual yt-dlp/download logic needs to be integrated here.
+        # Since we are using gevent, synchronous I/O should work, but be mindful of long tasks.
+        # For production-grade resilience, complex/long tasks should ideally be offloaded.
+        
+        # Simulate work
+        # import time; time.sleep(5) 
+        
+        await update.message.reply_text(f"✅ Download simulation complete for: `{link}`")
 
     except Exception as e:
-        logging.error(f"Error in downloader for chat {update.effective_chat.id}: {e}")
-        await update.message.reply_text("❌ An error occurred during the download process.")
+        logging.error(f"Error in downloader for chat {update.effective_chat.id}: {e}", exc_info=True)
+        await update.message.reply_text("❌ An internal error occurred during the download process.")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log the error and send a message to the user."""
@@ -75,6 +86,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # Only reply if there is an update object and a message
     if update and update.effective_chat:
         try:
+            # We use context.bot.send_message instead of update.message.reply_text because 
+            # the error might occur before a message object is available (e.g., in inline queries)
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text="🤖 Sorry, I ran into an error! Please try again later."
@@ -99,31 +112,21 @@ app_flask = Flask(__name__)
 # Define the run_setup function to set the webhook
 def run_setup():
     """Sets the webhook on the Telegram side."""
+    logging.info("Starting bot configuration via synchronous runner...")
+    
+    webhook_path = f"/{TOKEN}"
+    full_webhook_url = WEBHOOK_URL.rstrip('/') + webhook_path
+    
     try:
-        logging.info("Starting bot configuration via synchronous runner...")
-        
-        # Use Application.post_init to perform async setup in a sync context
-        # This is a safe way to call async setup functions at startup.
-        application.post_init()
-        
-        # Set the webhook URL
-        webhook_path = f"/{TOKEN}"
-        full_webhook_url = WEBHOOK_URL.rstrip('/') + webhook_path
-        
-        # Application.set_webhook must be called in a running async context,
-        # so we use application.run_polling() with 'drop_interval' to run 
-        # a one-off task in a temporary application runner.
+        # Use run_polling for a one-off run to set the webhook.
+        # This correctly initializes and runs the necessary async components once.
         application.run_polling(
             drop_interval=1,
             check_interval=0.1,
             poll_interval=0,
-            close_loop=True, # Ensure the loop closes after the task
-            stop_signals=None, # Don't rely on OS signals here
-            # Set the webhook inside the startup hook
-            # Note: We use the runner's application instance to set the webhook
-            # as it's guaranteed to be in a valid async context.
+            close_loop=True,
+            stop_signals=None,
             startup_webhook=full_webhook_url,
-            # We only want to run the startup, not continuously poll
             max_iterations=1,
             timeout=10,
         )
@@ -132,8 +135,8 @@ def run_setup():
         logging.info("Bot configuration complete. Ready for server startup.")
         
     except Exception as e:
-        logging.error(f"Failed to configure bot webhook: {e}")
-        # Exit if setup fails critically
+        # Re-raise the exception after logging to ensure Gunicorn/Render stops the deploy
+        logging.error(f"Failed to configure bot webhook: '{e}'")
         sys.exit(1)
 
 
@@ -143,6 +146,10 @@ def telegram_webhook():
     """Handles incoming Telegram updates."""
     # Process the update using the Telegram Application instance
     try:
+        # Check for empty JSON body which can happen if Telegram pings the webhook URL
+        if not request.json:
+            return "OK"
+            
         update = Update.de_json(request.get_json(force=True), application.bot)
         # Process the update asynchronously within the Gevent worker
         application.process_update(update)
@@ -162,5 +169,5 @@ def health_check():
 # The standard entry point for Gunicorn
 if __name__ == "__main__":
     run_setup()
-    # In a local environment, you would run the Flask app directly
-    # app_flask.run(port=8000)
+    # Gunicorn will start the app_flask object using its command:
+    # gunicorn --bind 0.0.0.0:$PORT main:app_flask --worker-class gevent
