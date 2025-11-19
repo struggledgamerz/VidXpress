@@ -15,9 +15,9 @@ from telegram.ext import (
 
 # --- Configuration ---
 # Use environment variables for sensitive data
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY")
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY")
 # WEBHOOK_URL_BASE is the base URL of your deployed service (e.g., https://ff-like-bot-px1w.onrender.com)
-WEBHOOK_URL_BASE = os.environ.get("WEBHOOK_URL_BASE", "https://example.com")
+WEBHOOK_URL_BASE = os.environ.get("WEBHOOK_URL_BASE", "https://ff-like-bot-px1w.onrender.com")
 # PORT is provided by the environment (e.g., Render)
 PORT = int(os.environ.get("PORT", "8080")) 
 
