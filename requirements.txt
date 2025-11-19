@@ -2,9 +2,9 @@ Flask
 python-telegram-bot
 gunicorn
 yt-dlp
-uvicorn  # <--- New required package
 js2py
 pyjsparser
 requests
 tornado
 tzlocal
+gevent  # <--- New required package for concurrent WSGI
