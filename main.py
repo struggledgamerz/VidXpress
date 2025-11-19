@@ -1,367 +1,183 @@
-# CRITICAL FIX: Gevent monkey-patching MUST happen before any
-# I/O libraries (like httpx, which PTB uses) are imported).
-from gevent import monkey
-# Patching is critical for gevent to handle async libraries like python-telegram-bot
-monkey.patch_all()
-
 import logging
 import os
 import sys
 import asyncio
-import yt_dlp
-import tempfile
-import shutil
-import gevent # Explicitly import gevent for use in the webhook handler
+from typing import Dict, Any
 
-from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ParseMode
+from fastapi import FastAPI, Request, HTTPException
+from telegram import Update
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
+    Application, 
+    CommandHandler, 
+    MessageHandler, 
+    filters
 )
 
-# --- Configuration & Setup ---
+# --- Configuration ---
+# Use environment variables for sensitive data
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY")
+# WEBHOOK_URL_BASE is the base URL of your deployed service (e.g., https://ff-like-bot-px1w.onrender.com)
+WEBHOOK_URL_BASE = os.environ.get("WEBHOOK_URL_BASE", "https://example.com")
+# PORT is provided by the environment (e.g., Render)
+PORT = int(os.environ.get("PORT", "8080")) 
 
+# The full webhook path Telegram will call
+WEBHOOK_URL = f"{WEBHOOK_URL_BASE}/{BOT_TOKEN}"
+
+# Set up logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("telegram").setLevel(logging.INFO) 
+logger = logging.getLogger(__name__)
 
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY")
-WEBHOOK_URL = os.environ.get("WEBHOOK_BASE_URL", "https://your-app-name.onrender.com")
+# --- Application and Handlers ---
 
-application = (
-    Application.builder()
-    .token(TOKEN)
-    .concurrent_updates(True) 
-    .build()
-)
-
-# --- Utility Functions ---
-
-def get_link_from_message(update: Update) -> str | None:
-    """Extracts a URL from the message text."""
-    if update.message and update.message.text:
-        # Simple extraction for raw links
-        return update.message.text.strip()
-    return None
-
-async def process_download_core(update: Update, context: ContextTypes.DEFAULT_TYPE, link: str, mode: str, message_id: int) -> None:
-    """The core function for handling both audio and video downloads."""
-    chat_id = update.effective_chat.id
-    
-    temp_dir = tempfile.mkdtemp()
-    
-    try:
-        logging.info(f"Starting {mode} download for: {link} in temp dir: {temp_dir}")
-        
-        # --- yt-dlp Options based on Mode ---
-        if mode == 'audio':
-            mode_description = "Audio Extraction (MP3)"
-            # Audio only, converted to MP3
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
-                'max_filesize': 50 * 1024 * 1024,
-                'restrictfilenames': True,
-                'noplaylist': True,
-                'verbose': False,
-                'logger': logging.getLogger('yt_dlp'),
-            }
-        else: # mode == 'video'
-            mode_description = "Video Download (MP4/WebM)"
-            # Best quality video and audio combined
-            ydl_opts = {
-                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 
-                'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-                'max_filesize': 50 * 1024 * 1024,
-                'restrictfilenames': True,
-                'noplaylist': True,
-                'verbose': False,
-                'logger': logging.getLogger('yt_dlp'),
-            }
-
-        # Update message to show processing status
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=f"⏳ Step 1/2: Processing link and starting {mode_description} download\\.",
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-
-        # 1. Download the file
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # yt-dlp needs to run in a separate thread/process if not using gevent/monkey patch properly, 
-            # but with monkey.patch_all() and gevent worker, it should cooperate.
-            info_dict = ydl.extract_info(link, download=True)
-            
-            # Find the path to the downloaded file
-            if mode == 'audio':
-                file_ext = '.mp3'
-            else:
-                # Look for mp4, webm, or any other common video extension
-                file_exts = ['.mp4', '.webm', '.mkv', '.ogg', '.avi'] # Added more common extensions
-                
-                # Check directly in the info_dict for the final file path
-                downloaded_file_path = None
-                if '_format_sort' in info_dict and isinstance(info_dict['_format_sort'], list):
-                    # Check the list of downloaded files (useful for post-processing)
-                    for entry in info_dict['_format_sort']:
-                        if 'filepath' in entry and os.path.exists(entry['filepath']):
-                            downloaded_file_path = entry['filepath']
-                            break
-                
-                # Fallback check (used previously, simpler but less reliable)
-                if not downloaded_file_path:
-                    found_files = [f for f in os.listdir(temp_dir) if any(f.endswith(ext) for ext in file_exts) or f.endswith('.mp4') or f.endswith('.webm')]
-                    if found_files:
-                        downloaded_file_path = os.path.join(temp_dir, found_files[0])
-
-
-            # Re-check for audio file path in case the list was empty or complex
-            if mode == 'audio' and not downloaded_file_path:
-                 found_audio_files = [f for f in os.listdir(temp_dir) if f.endswith('.mp3')]
-                 if found_audio_files:
-                    downloaded_file_path = os.path.join(temp_dir, found_audio_files[0])
-
-            if downloaded_file_path and os.path.exists(downloaded_file_path):
-                file_size_mb = os.path.getsize(downloaded_file_path) / (1024 * 1024)
-            else:
-                raise FileNotFoundError(f"yt-dlp completed, but the expected {mode} file was not found.")
-
-
-        # 2. Upload the file to Telegram
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=f"⏳ Step 2/2: Uploading {mode} file: *{info_dict.get('title', 'Unknown Title')}* \\({file_size_mb:.2f} MB\\)\\.",
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-
-        with open(downloaded_file_path, 'rb') as media_file:
-            if mode == 'audio':
-                await context.bot.send_audio(
-                    chat_id=chat_id,
-                    audio=media_file,
-                    title=info_dict.get('title', 'Downloaded Audio'),
-                    performer=info_dict.get('uploader', 'Unknown'),
-                    caption=f"Downloaded via the Bot\\. [Original Link]({link})",
-                    parse_mode=ParseMode.MARKDOWN_V2
-                )
-            else: # mode == 'video'
-                await context.bot.send_video(
-                    chat_id=chat_id,
-                    video=media_file,
-                    caption=f"Downloaded via the Bot\\. [Original Link]({link})",
-                    parse_mode=ParseMode.MARKDOWN_V2
-                )
-            
-        # Clean up the status message by editing it to a success message
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=f"✅ {mode_description} complete\\!",
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-        
-    except yt_dlp.utils.DownloadError as e:
-        error_msg = str(e)
-        if "size limit" in error_msg:
-             reply_text = f"❌ Download Failed\\. The file size exceeds the 50MB limit\\. Please choose a shorter media file\\."
-        elif "Unsupported URL" in error_msg:
-            reply_text = "❌ Download Failed\\. The link provided is not supported by the downloader\\."
-        else:
-            reply_text = "❌ Download Failed\\. An error occurred during the extraction process\\."
-        
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=reply_text,
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-        logging.error(f"yt-dlp Download Error: {e}", exc_info=True)
-
-    except Exception as e:
-        logging.error(f"Error in downloader for chat {chat_id}: {e}", exc_info=True)
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text="❌ An internal error occurred during the download process\\.",
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-
-    finally:
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-            logging.info(f"Cleaned up temporary directory: {temp_dir}")
-
-
-# --- Handlers ---
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends a welcome message on /start."""
-    if update.message:
-        await update.message.reply_text(
-            "Hello\\! Send me any media link \\(YouTube, etc\\)\\. I'll ask you if you want to download the **Full Video** or the **Audio Only**\\.\n\n"
-            "\\*Note: All files are limited to \\~50MB\\.",
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-
-async def prompt_user_for_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Catches a raw link and prompts the user to select video or audio mode."""
-    link = get_link_from_message(update)
-    if not link:
-        return
-    
-    # Store the link and the message ID for later use in the callback query
-    # We store the link in the context.user_data tied to the user/chat
-    context.user_data['current_link'] = link
-    
-    keyboard = [
-        [
-            InlineKeyboardButton("1. 🎬 Full Video (Max 50MB)", callback_data='mode_video'),
-            InlineKeyboardButton("2. 🎧 Audio Only (MP3, Max 50MB)", callback_data='mode_audio'),
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # Use escape_markdown(link, version=2) for safety within the message text
-    escaped_link = link.replace('.', '\\.').replace('-', '\\-').replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
-    
-    # We reply to the user message with the prompt and the keyboard
-    prompt_message = await update.message.reply_text(
-        f"You sent the link: `{escaped_link}`\n\nWhat would you like to download?",
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN_V2
+async def start_command(update: Update, context: Application) -> None:
+    """Sends a welcome message when the /start command is issued."""
+    logger.info(f"Received /start from user {update.effective_user.id}")
+    await update.message.reply_text(
+        "Welcome! I'm a simple bot running on an asynchronous server (Uvicorn/FastAPI). "
+        "Send me any text!"
     )
-    # Store the prompt message ID so we can edit it later.
-    context.user_data['prompt_message_id'] = prompt_message.message_id
 
+async def echo_message(update: Update, context: Application) -> None:
+    """Echoes the user's message."""
+    logger.info(f"Received message from user {update.effective_user.id}: {update.message.text}")
+    text = update.message.text
+    # Simple logic: if the user sends text, echo it back
+    if text:
+        await update.message.reply_text(f"You said: {text}")
 
-async def handle_mode_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the button press (callback query) to start the download."""
-    query = update.callback_query
-    # Always call answer to dismiss the loading indicator on the button
-    await query.answer()
+async def error_handler(update: Update, context: Application) -> None:
+    """Log the error and notify the user (optional)."""
+    logger.error("Exception while handling an update:", exc_info=context.error)
+
+# --- PTB Application Setup ---
+
+def build_application() -> Application:
+    """Builds and returns the PTB Application instance."""
+    # We use Application.builder() for the modern, async PTB
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .updater(None)  # We are using webhooks, so no built-in polling/updater
+        .build()
+    )
+
+    # Register handlers
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_message))
+    application.add_error_handler(error_handler)
     
-    # Retrieve the stored link and message ID
-    link = context.user_data.pop('current_link', None)
-    message_id = context.user_data.pop('prompt_message_id', query.message.message_id)
-    
-    if not link:
-        # If the link is not found (e.g., bot restarted or too much time passed)
-        await query.edit_message_text(
-            "❌ Error: Couldn't find the original link or the link expired\\. Please send the link again to restart\\.", 
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-        return
+    return application
 
-    mode = query.data.replace('mode_', '')
-    
-    # Pass control to the core download function, using the prompt message ID for status updates
-    await process_download_core(update, context, link, mode, message_id)
+# Initialize the application instance
+application = build_application()
 
-
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log the error and send a message to the user."""
-    logging.error("Exception while handling an update:", exc_info=context.error)
-    if update and update.effective_chat:
-        try:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="🤖 Sorry, I ran into an error\\! Please try again later\\.",
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
-        except Exception as e:
-            logging.error(f"Failed to send error message: {e}")
-
-
-# --- Application Configuration ---
-
-application.add_handler(CommandHandler("start", start))
-
-# Handler 1: Catches raw links and prompts for mode selection
-application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'https?://\S+') & (~filters.COMMAND), prompt_user_for_mode))
-
-# Handler 2: Catches button clicks (callback queries)
-application.add_handler(CallbackQueryHandler(handle_mode_selection, pattern='^mode_(audio|video)$'))
-
-application.add_error_handler(error_handler)
-
-
-# --- Webhook and Server Setup ---
-
-app_flask = Flask(__name__)
-
-async def _set_webhook_async():
-    """Internal async function to set the webhook."""
-    webhook_path = f"/{TOKEN}"
-    full_webhook_url = WEBHOOK_URL.rstrip('/') + webhook_path
-    
-    logging.info(f"DEBUG: Using BOT TOKEN (first 10 chars): {TOKEN[:10]}...")
-    logging.info(f"DEBUG: Calculated Webhook URL: {full_webhook_url}")
-    
-    await application.bot.set_webhook(url=full_webhook_url)
-    logging.info(f"Webhook successfully set to: {full_webhook_url}")
+# --- Webhook Setup Function (called once on startup) ---
 
 def run_setup():
-    """Sets the webhook on the Telegram side using asyncio.run()."""
-    logging.info("Starting bot configuration via synchronous runner...")
-    try:
-        # We need to run this outside the gevent worker context, so asyncio.run is fine here.
-        asyncio.run(_set_webhook_async())
-        logging.info("Bot configuration complete. Ready for server startup.")
-        
-    except Exception as e:
-        logging.error(f"Failed to configure bot webhook: '{e}'")
+    """
+    Synchronous setup function called by the deployment environment 
+    to set the webhook URL before the server starts.
+    """
+    logger.info("Starting bot configuration via synchronous runner...")
+
+    if "YOUR_BOT_TOKEN_HERE" in BOT_TOKEN:
+        logger.error("FATAL: BOT_TOKEN is not configured! Cannot set webhook.")
         sys.exit(1)
 
+    logger.info(f"DEBUG: Using BOT TOKEN (first 10 chars): {BOT_TOKEN[:10]}...")
+    logger.info(f"DEBUG: Calculated Webhook URL: {WEBHOOK_URL}")
 
-@app_flask.route(f"/{TOKEN}", methods=["POST"])
-def telegram_webhook():
-    """Handles incoming Telegram updates using gevent to bridge async PTB."""
-    logging.info("DEBUG: Received incoming request on Flask webhook route. Attempting to process update.")
-    
+    # Use a separate asyncio event loop for the setup phase
+    # This ensures the async PTB application methods can be called correctly
+    async def set_webhook_async():
+        await application.bot.set_webhook(
+            url=WEBHOOK_URL,
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+            # We set a max_connections limit as a best practice
+            max_connections=40
+        )
+        
     try:
-        if not request.json:
-            logging.warning("Received request but JSON body was empty.")
-            return "OK"
-        
-        update = Update.de_json(request.get_json(force=True), application.bot)
-
-        async def process_telegram_update_wrapper():
-            """Wrapper to ensure application is initialized and processes the update."""
-            if not application._initialized:
-                await application.initialize()
-            
-            await application.process_update(update)
-
-        # FIX: Replace asyncio.run() with gevent.spawn().get() to run the async PTB code
-        # within the gevent worker's context, preventing the "Event loop is closed" error.
-        gevent.spawn(process_telegram_update_wrapper).get()
-        
-        return "OK"
-        
+        # Run the async setup in a new event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(application.initialize())
+        loop.run_until_complete(set_webhook_async())
+        logger.info(f"Webhook successfully set to: {WEBHOOK_URL}")
     except Exception as e:
-        logging.error(f"Error processing webhook update: {e}", exc_info=True)
-        # Always return 200/OK to Telegram even if processing failed to prevent retries
-        return "OK"
+        logger.error(f"Failed to set webhook: {e}")
+        # In a production environment, you might want to exit here if setup fails
+        
+    logger.info("Bot configuration complete. Ready for server startup.")
 
-@app_flask.route("/", methods=["GET", "HEAD"])
+
+# --- FastAPI Web Server ---
+
+# The main FastAPI application instance (used by Uvicorn)
+app_fastapi = FastAPI(title="Async Telegram Webhook Bot")
+
+@app_fastapi.get("/")
 def health_check():
-    """Simple health check."""
-    return "Bot running", 200
+    """Simple endpoint for health checks."""
+    return {"status": "ok"}
+
+@app_fastapi.post(f"/{BOT_TOKEN}")
+async def telegram_webhook(request: Request):
+    """
+    The main webhook endpoint that receives updates from Telegram.
+    
+    NOTE: We use the full BOT_TOKEN as the route path, matching the WEBHOOK_URL.
+    """
+    # 1. Get JSON data from the request body asynchronously
+    try:
+        json_data: Dict[str, Any] = await request.json()
+    except Exception as e:
+        logger.error(f"Error reading request JSON: {e}")
+        raise HTTPException(status_code=400, detail="Invalid JSON format")
+    
+    logger.info("Received incoming request on FastAPI webhook route. Attempting to process update.")
+
+    # 2. Convert the raw JSON into a PTB Update object
+    try:
+        update = Update.de_json(json_data, application.bot)
+    except Exception as e:
+        logger.error(f"Error creating Update object: {e}")
+        # Return OK anyway to tell Telegram we received the message
+        return {"message": "Update creation failed, but request received"}
+
+    # 3. Process the update asynchronously! This is the fix for the RuntimeWarning.
+    try:
+        # Crucial: Must use 'await' here since process_update is an async function
+        await application.process_update(update)
+    except Exception as e:
+        logger.error(f"Error processing update: {e}", exc_info=True)
+        # Still return OK so Telegram doesn't keep retrying the same update
+        return {"message": "Update processing failed internally"}
+
+
+    # 4. Return the standard 'OK' response to Telegram
+    return {"message": "ok"}
+
 
 if __name__ == "__main__":
-    run_setup()
+    # If running locally (e.g., for local testing before deployment)
+    try:
+        # This is a local development/testing block, NOT typically run on Render/similar platforms
+        # since they call 'run_setup()' and then use Uvicorn via the start command.
+        
+        # If you run this file directly, it will start Uvicorn
+        import uvicorn
+        logger.info("Running locally via Uvicorn. Webhooks will not work unless you use a tunneling service like ngrok.")
+        application.run_polling(poll_interval=1.0, allowed_updates=Update.ALL_TYPES)
+        # You would typically run setup manually before starting the server locally, or use polling
+        # run_setup()
+        # uvicorn.run(app_fastapi, host="0.0.0.0", port=PORT)
+    except ImportError:
+        logger.error("Uvicorn is not installed. Cannot run locally. Did you forget to install it?")
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user.")
+        
