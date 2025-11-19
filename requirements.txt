@@ -1,6 +1,5 @@
 python-telegram-bot
 yt-dlp
 Flask
-gunicorn
-gevent
+uvicorn
 requests
