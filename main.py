@@ -1,13 +1,14 @@
 # CRITICAL FIX: Gevent monkey-patching MUST happen before any
-# I/O libraries (like httpx, which PTB uses) are imported.
+# I/O libraries (like httpx, which PTB uses) are imported).
 # This prevents the "RuntimeError: Event loop is closed" error
-# and is necessary for gevent workers to function correctly with asyncio code.
+# and ensures gevent workers can handle async tasks.
 from gevent import monkey
 monkey.patch_all()
 
 import logging
 import os
 import sys
+import asyncio
 
 from flask import Flask, request
 from telegram import Update
@@ -28,7 +29,7 @@ logging.basicConfig(
 )
 # Suppress noisy library logs (optional but helpful)
 logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("telegram").setLevel(logging.INFO) # Keep telegram logs useful
+logging.getLogger("telegram").setLevel(logging.INFO) 
 
 # Read token and webhook URL from environment variables
 # NOTE: Make sure these environment variables are correctly set in your deployment configuration.
@@ -47,7 +48,6 @@ application = (
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message on /start."""
-    # Ensure the update object and message are present before replying
     if update.message:
         await update.message.reply_text(
             "Hello! Send me a link to download content.",
@@ -67,14 +67,14 @@ async def downloader(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         link = update.message.text
         logging.info(f"Received link for download: {link}")
         
-        # NOTE: Your actual yt-dlp/download logic needs to be integrated here.
-        # Since we are using gevent, synchronous I/O should work, but be mindful of long tasks.
-        # For production-grade resilience, complex/long tasks should ideally be offloaded.
+        # NOTE: Implement your blocking yt-dlp logic here.
+        # Since gevent is patching, synchronous I/O should work within the worker.
         
-        # Simulate work
-        # import time; time.sleep(5) 
-        
-        await update.message.reply_text(f"✅ Download simulation complete for: `{link}`")
+        # Example using context.bot to send the final message
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"✅ Download simulation complete for: `{link}`"
+        )
 
     except Exception as e:
         logging.error(f"Error in downloader for chat {update.effective_chat.id}: {e}", exc_info=True)
@@ -83,11 +83,8 @@ async def downloader(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log the error and send a message to the user."""
     logging.error("Exception while handling an update:", exc_info=context.error)
-    # Only reply if there is an update object and a message
     if update and update.effective_chat:
         try:
-            # We use context.bot.send_message instead of update.message.reply_text because 
-            # the error might occur before a message object is available (e.g., in inline queries)
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text="🤖 Sorry, I ran into an error! Please try again later."
@@ -109,34 +106,28 @@ application.add_error_handler(error_handler)
 # Create the Flask application instance
 app_flask = Flask(__name__)
 
-# Define the run_setup function to set the webhook
-def run_setup():
-    """Sets the webhook on the Telegram side."""
-    logging.info("Starting bot configuration via synchronous runner...")
-    
+async def _set_webhook_async():
+    """Internal async function to set the webhook."""
     webhook_path = f"/{TOKEN}"
     full_webhook_url = WEBHOOK_URL.rstrip('/') + webhook_path
     
-    try:
-        # Use run_polling for a one-off run to set the webhook.
-        # This correctly initializes and runs the necessary async components once.
-        application.run_polling(
-            drop_interval=1,
-            check_interval=0.1,
-            poll_interval=0,
-            close_loop=True,
-            stop_signals=None,
-            startup_webhook=full_webhook_url,
-            max_iterations=1,
-            timeout=10,
-        )
-
+    # Use the async context manager for setup/teardown
+    async with application:
+        await application.bot.set_webhook(url=full_webhook_url)
         logging.info(f"Webhook successfully set to: {full_webhook_url}")
+
+def run_setup():
+    """Sets the webhook on the Telegram side using asyncio.run()."""
+    logging.info("Starting bot configuration via synchronous runner...")
+    try:
+        # Run the async setup function synchronously
+        asyncio.run(_set_webhook_async())
         logging.info("Bot configuration complete. Ready for server startup.")
         
     except Exception as e:
         # Re-raise the exception after logging to ensure Gunicorn/Render stops the deploy
         logging.error(f"Failed to configure bot webhook: '{e}'")
+        # Exit with a non-zero status code to signal a failed startup
         sys.exit(1)
 
 
@@ -146,7 +137,6 @@ def telegram_webhook():
     """Handles incoming Telegram updates."""
     # Process the update using the Telegram Application instance
     try:
-        # Check for empty JSON body which can happen if Telegram pings the webhook URL
         if not request.json:
             return "OK"
             
@@ -169,5 +159,4 @@ def health_check():
 # The standard entry point for Gunicorn
 if __name__ == "__main__":
     run_setup()
-    # Gunicorn will start the app_flask object using its command:
-    # gunicorn --bind 0.0.0.0:$PORT main:app_flask --worker-class gevent
+    # Gunicorn command: gunicorn --bind 0.0.0.0:$PORT main:app_flask --worker-class gevent
