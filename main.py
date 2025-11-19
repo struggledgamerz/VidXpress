@@ -3,7 +3,6 @@ import logging
 import shutil
 import json
 import asyncio 
-# Removed 'escape' as it's not needed and caused ImportError
 from flask import Flask, request, Response 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
@@ -14,7 +13,6 @@ from download_manager import download_media
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY")
 PORT = int(os.environ.get("PORT", "8080"))
 # IMPORTANT: The user MUST set this environment variable on Render
-# NOTE: Using the detected URL from your logs (ff-like-bot-px1w.onrender.com)
 WEBHOOK_BASE_URL = os.environ.get("WEBHOOK_BASE_URL", "https://ff-like-bot-px1w.onrender.com") 
 WEBHOOK_URL_PATH = f"/{TOKEN}" 
 WEBHOOK_URL = f"{WEBHOOK_BASE_URL}{WEBHOOK_URL_PATH}"
@@ -186,9 +184,15 @@ def telegram_webhook():
         
         # Define and run the async processing function synchronously
         async def process_update_async():
-            # The ASGI worker (Uvicorn) manages the event loop for the actual request
+            # FIX: The application loses its 'initialized' state when workers fork.
+            # We must re-initialize it here before processing updates.
+            # Since initialize() is idempotent, calling it multiple times is safe.
+            await application.initialize()
+            
             await application.process_update(update)
 
+        # NOTE: asyncio.run() must be used inside a synchronous function when dealing 
+        # with telegram.ext in a webhook environment outside of its built-in runner.
         asyncio.run(process_update_async())
         
     except Exception as e:
@@ -206,8 +210,9 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download
 
 # 2. Setup Webhook Function (Async)
 async def async_setup_webhook():
-    """Initializes PTB Application and sets the webhook in Manual Mode."""
-    await application.initialize() 
+    """Sets the webhook in Manual Mode."""
+    # WARNING: We intentionally removed initialize() from here, as it needs to run
+    # in the context of the worker (in telegram_webhook), not the main setup script.
     
     # Set the Webhook on Telegram (Async Operation)
     if WEBHOOK_BASE_URL and WEBHOOK_BASE_URL != "https://your-app-name.example.com":
@@ -224,7 +229,8 @@ async def async_setup_webhook():
 def run_setup():
     """Runs the asynchronous setup function synchronously once."""
     logger.info("Starting bot configuration via synchronous runner...")
+    # This setup ensures the webhook is set and is non-blocking to the server startup
     asyncio.run(async_setup_webhook())
     logger.info("Bot configuration complete. Ready for server startup.")
 
-# --- The auto-execution block is removed. We use the external command instead. ---
+# The auto-execution block is removed. We use the external command instead.
