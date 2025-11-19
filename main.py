@@ -14,7 +14,8 @@ from download_manager import download_media
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY")
 PORT = int(os.environ.get("PORT", "8080"))
 # IMPORTANT: The user MUST set this environment variable on Render
-WEBHOOK_BASE_URL = os.environ.get("WEBHOOK_BASE_URL", "https://your-app-name.example.com") 
+# NOTE: Using the detected URL from your logs (ff-like-bot-px1w.onrender.com)
+WEBHOOK_BASE_URL = os.environ.get("WEBHOOK_BASE_URL", "https://ff-like-bot-px1w.onrender.com") 
 WEBHOOK_URL_PATH = f"/{TOKEN}" 
 WEBHOOK_URL = f"{WEBHOOK_BASE_URL}{WEBHOOK_URL_PATH}"
 # --- END CONFIGURATION ---
@@ -183,33 +184,12 @@ def telegram_webhook():
     try:
         update = Update.de_json(data=request.json, bot=application.bot)
         
+        # Define and run the async processing function synchronously
         async def process_update_async():
+            # The ASGI worker (Uvicorn) manages the event loop for the actual request
             await application.process_update(update)
 
-        # --- FINAL CRITICAL FIX: Robust Manual Event Loop Management with Cleanup ---
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        try:
-            # 1. Run the async function until completion
-            loop.run_until_complete(process_update_async())
-            
-        except Exception as e:
-            # Re-raise exceptions to be caught by the outer block
-            raise e
-            
-        finally:
-            # 2. Cleanup outstanding tasks (MANDATORY for reliable closure in Gunicorn)
-            pending = asyncio.all_tasks(loop=loop)
-            if pending:
-                # Cancel and gather all pending tasks (graceful shutdown)
-                # We ignore exceptions here as we are cleaning up
-                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-            
-            # 3. Close the loop cleanly
-            loop.stop()
-            loop.close()
-        # ---------------------------------------------------------------------------
+        asyncio.run(process_update_async())
         
     except Exception as e:
         logger.error(f"Error processing update: {e}", exc_info=True)
@@ -218,38 +198,33 @@ def telegram_webhook():
         
     return Response("OK", status=HTTPStatus.OK)
 
-# --- BOT INITIALIZATION (Runs on Gunicorn load) ---
+# --- BOT INITIALIZATION ---
 
 # 1. Add Handlers (Sync Operation - Runs on Gunicorn import)
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, downloader))
 
-# 2. Define the async setup function for bot initialization
-async def setup_webhook():
+# 2. Setup Webhook Function (Async)
+async def async_setup_webhook():
     """Initializes PTB Application and sets the webhook in Manual Mode."""
-    # Mandatory initialization step (REQUIRED)
     await application.initialize() 
     
-    # NOTE: We DO NOT call await application.start() in manual mode for external servers.
-    
-    # 3. Set the Webhook on Telegram (Async Operation)
-    try:
-        await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
-        logger.info(f"Webhook successfully set to: {WEBHOOK_URL}")
-    except Exception as e:
-        logger.error(f"Failed to set webhook URL! Error: {e}")
-        raise # Stop if webhook setup fails
+    # Set the Webhook on Telegram (Async Operation)
+    if WEBHOOK_BASE_URL and WEBHOOK_BASE_URL != "https://your-app-name.example.com":
+        try:
+            await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
+            logger.info(f"Webhook successfully set to: {WEBHOOK_URL}")
+        except Exception as e:
+            logger.error(f"Failed to set webhook URL! Error: {e}")
+            raise # Stop if webhook setup fails
+    else:
+        logger.error("!!! CRITICAL ERROR: WEBHOOK_BASE_URL not set. Webhook setup skipped.")
 
-# 4. Run the async setup function synchronously before Gunicorn starts serving.
-if WEBHOOK_BASE_URL and WEBHOOK_BASE_URL != "https://your-app-name.example.com":
-    try:
-        logger.info("Starting bot configuration...")
-        asyncio.run(setup_webhook())
-        logger.info("Bot configuration complete and ready for Gunicorn.")
-    except Exception as e:
-        logger.critical(f"Bot setup failed during initialization: {e}")
-        # Allow Gunicorn to start, but the bot might not work due to failed webhook set.
-else:
-    logger.error("!!! CRITICAL ERROR: WEBHOOK_BASE_URL not set. Webhook setup skipped. Please check your Render environment variables.")
+# 3. Synchronous Runner Function for Setup
+def run_setup():
+    """Runs the asynchronous setup function synchronously once."""
+    logger.info("Starting bot configuration via synchronous runner...")
+    asyncio.run(async_setup_webhook())
+    logger.info("Bot configuration complete. Ready for server startup.")
 
-# --- END OF FILE ---
+# --- The auto-execution block is removed. We use the external command instead. ---
