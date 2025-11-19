@@ -52,9 +52,9 @@ application = (
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message on /start."""
     if update.message:
-        # Note: Using escape characters (\\) for underscores/dots in MARKDOWN_V2
+        # Note: Added escape for '!' in "Hello!"
         await update.message.reply_text(
-            "Hello! Send me a link to download content\\. I'll try to extract the **audio** \\(up to \\~50MB\\) and send it back\\.",
+            "Hello\\! Send me a link to download content\\. I'll try to extract the **audio** \\(up to \\~50MB\\) and send it back\\.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
 
@@ -111,7 +111,8 @@ async def downloader(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             chat_id=chat_id,
             message_id=download_message.message_id,
             text=f"Uploading audio: *{info_dict.get('title', 'Unknown Title')}*",
-            # Note: Using ParseMode.MARKDOWN for title/uploader updates
+            # We use MARKDOWN here because the title might contain characters that break MARKDOWN_V2,
+            # and MARKDOWN is less strict. It's safe to use as we're only bolding the title.
             parse_mode=ParseMode.MARKDOWN
         )
 
@@ -166,9 +167,10 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     logging.error("Exception while handling an update:", exc_info=context.error)
     if update and update.effective_chat:
         try:
+            # Note: Added escape for '!' in "error!"
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="🤖 Sorry, I ran into an error! Please try again later\\.",
+                text="🤖 Sorry, I ran into an error\\! Please try again later\\.",
                 parse_mode=ParseMode.MARKDOWN_V2
             )
         except Exception as e:
