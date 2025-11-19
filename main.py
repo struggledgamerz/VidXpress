@@ -66,6 +66,7 @@ async def downloader(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     chat_id = user_message.chat_id
     link = user_message.text
     
+    # We reply with a message first, which ensures the bot is responsive while the download happens.
     download_message = await user_message.reply_text("⏳ Processing link and starting download... Please wait.")
 
     # Create a temporary directory for the download
@@ -92,6 +93,7 @@ async def downloader(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
         # 1. Download the file using yt-dlp
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Note: yt_dlp is synchronous and fine to call here.
             info_dict = ydl.extract_info(link, download=True)
             
             # Find the path to the downloaded MP3 file
@@ -185,16 +187,17 @@ application.add_error_handler(error_handler)
 app_flask = Flask(__name__)
 
 async def _set_webhook_async():
-    """Internal async function to set the webhook."""
+    """Internal async function to set the webhook and perform initialization."""
     webhook_path = f"/{TOKEN}"
     full_webhook_url = WEBHOOK_URL.rstrip('/') + webhook_path
     
     logging.info(f"DEBUG: Using BOT TOKEN (first 10 chars): {TOKEN[:10]}...")
     logging.info(f"DEBUG: Calculated Webhook URL: {full_webhook_url}")
     
-    async with application:
-        await application.bot.set_webhook(url=full_webhook_url)
-        logging.info(f"Webhook successfully set to: {full_webhook_url}")
+    # We don't initialize here, as initialization must happen per worker.
+    # We only use the application context to set the webhook URL.
+    await application.bot.set_webhook(url=full_webhook_url)
+    logging.info(f"Webhook successfully set to: {full_webhook_url}")
 
 def run_setup():
     """Sets the webhook on the Telegram side using asyncio.run()."""
@@ -205,7 +208,6 @@ def run_setup():
         logging.info("Bot configuration complete. Ready for server startup.")
         
     except Exception as e:
-        # Re-raise the exception after logging to ensure Gunicorn/Render stops the deploy
         logging.error(f"Failed to configure bot webhook: '{e}'")
         sys.exit(1)
 
@@ -221,14 +223,24 @@ def telegram_webhook():
             logging.warning("Received request but JSON body was empty.")
             return "OK"
         
+        # 1. Parse the update from the request body
         update = Update.de_json(request.get_json(force=True), application.bot)
 
-        # CRITICAL FIX: The process_update method is an async coroutine 
-        # that must be explicitly run in this synchronous Flask context.
-        asyncio.run(application.process_update(update))
+        # 2. Define an async task to handle the update
+        async def process_telegram_update():
+            # CRITICAL FIX: Explicitly initialize the Application object in the worker process.
+            if not application.is_initialized():
+                await application.initialize()
+            
+            # Process the update
+            await application.process_update(update)
+
+        # 3. CRITICAL FIX: Run the async task synchronously
+        asyncio.run(process_telegram_update())
         
         # Telegram requires an immediate 200 OK response
         return "OK"
+        
     except Exception as e:
         # Log the error, but still return 200 to Telegram to prevent retry loops
         logging.error(f"Error processing webhook update: {e}", exc_info=True)
