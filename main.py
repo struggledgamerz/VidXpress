@@ -1,6 +1,7 @@
 # CRITICAL FIX: Gevent monkey-patching MUST happen before any
 # I/O libraries (like httpx, which PTB uses) are imported).
 from gevent import monkey
+# Patching is critical for gevent to handle async libraries like python-telegram-bot
 monkey.patch_all()
 
 import logging
@@ -10,6 +11,7 @@ import asyncio
 import yt_dlp
 import tempfile
 import shutil
+import gevent # Explicitly import gevent for use in the webhook handler
 
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -100,6 +102,8 @@ async def process_download_core(update: Update, context: ContextTypes.DEFAULT_TY
 
         # 1. Download the file
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # yt-dlp needs to run in a separate thread/process if not using gevent/monkey patch properly, 
+            # but with monkey.patch_all() and gevent worker, it should cooperate.
             info_dict = ydl.extract_info(link, download=True)
             
             # Find the path to the downloaded file
@@ -107,14 +111,31 @@ async def process_download_core(update: Update, context: ContextTypes.DEFAULT_TY
                 file_ext = '.mp3'
             else:
                 # Look for mp4, webm, or any other common video extension
-                file_exts = ['.mp4', '.webm', '.mkv']
-                found_files = [f for f in os.listdir(temp_dir) if any(f.endswith(ext) for ext in file_exts)]
-                file_ext = os.path.splitext(found_files[0])[1] if found_files else '.tmp'
-            
-            downloaded_files = [f for f in os.listdir(temp_dir) if f.endswith(file_ext)]
-            
-            if downloaded_files:
-                downloaded_file_path = os.path.join(temp_dir, downloaded_files[0])
+                file_exts = ['.mp4', '.webm', '.mkv', '.ogg', '.avi'] # Added more common extensions
+                
+                # Check directly in the info_dict for the final file path
+                downloaded_file_path = None
+                if '_format_sort' in info_dict and isinstance(info_dict['_format_sort'], list):
+                    # Check the list of downloaded files (useful for post-processing)
+                    for entry in info_dict['_format_sort']:
+                        if 'filepath' in entry and os.path.exists(entry['filepath']):
+                            downloaded_file_path = entry['filepath']
+                            break
+                
+                # Fallback check (used previously, simpler but less reliable)
+                if not downloaded_file_path:
+                    found_files = [f for f in os.listdir(temp_dir) if any(f.endswith(ext) for ext in file_exts) or f.endswith('.mp4') or f.endswith('.webm')]
+                    if found_files:
+                        downloaded_file_path = os.path.join(temp_dir, found_files[0])
+
+
+            # Re-check for audio file path in case the list was empty or complex
+            if mode == 'audio' and not downloaded_file_path:
+                 found_audio_files = [f for f in os.listdir(temp_dir) if f.endswith('.mp3')]
+                 if found_audio_files:
+                    downloaded_file_path = os.path.join(temp_dir, found_audio_files[0])
+
+            if downloaded_file_path and os.path.exists(downloaded_file_path):
                 file_size_mb = os.path.getsize(downloaded_file_path) / (1024 * 1024)
             else:
                 raise FileNotFoundError(f"yt-dlp completed, but the expected {mode} file was not found.")
@@ -146,7 +167,13 @@ async def process_download_core(update: Update, context: ContextTypes.DEFAULT_TY
                     parse_mode=ParseMode.MARKDOWN_V2
                 )
             
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        # Clean up the status message by editing it to a success message
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"✅ {mode_description} complete\\!",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
         
     except yt_dlp.utils.DownloadError as e:
         error_msg = str(e)
@@ -198,7 +225,7 @@ async def prompt_user_for_mode(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     
     # Store the link and the message ID for later use in the callback query
-    # We store the link in the context.user_data to be retrieved later
+    # We store the link in the context.user_data tied to the user/chat
     context.user_data['current_link'] = link
     
     keyboard = [
@@ -212,11 +239,15 @@ async def prompt_user_for_mode(update: Update, context: ContextTypes.DEFAULT_TYP
     # Use escape_markdown(link, version=2) for safety within the message text
     escaped_link = link.replace('.', '\\.').replace('-', '\\-').replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
     
-    await update.message.reply_text(
+    # We reply to the user message with the prompt and the keyboard
+    prompt_message = await update.message.reply_text(
         f"You sent the link: `{escaped_link}`\n\nWhat would you like to download?",
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN_V2
     )
+    # Store the prompt message ID so we can edit it later.
+    context.user_data['prompt_message_id'] = prompt_message.message_id
+
 
 async def handle_mode_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles the button press (callback query) to start the download."""
@@ -224,8 +255,9 @@ async def handle_mode_selection(update: Update, context: ContextTypes.DEFAULT_TY
     # Always call answer to dismiss the loading indicator on the button
     await query.answer()
     
-    # Retrieve the stored link and clear it from user_data
+    # Retrieve the stored link and message ID
     link = context.user_data.pop('current_link', None)
+    message_id = context.user_data.pop('prompt_message_id', query.message.message_id)
     
     if not link:
         # If the link is not found (e.g., bot restarted or too much time passed)
@@ -237,8 +269,8 @@ async def handle_mode_selection(update: Update, context: ContextTypes.DEFAULT_TY
 
     mode = query.data.replace('mode_', '')
     
-    # Pass control to the core download function
-    await process_download_core(update, context, link, mode, query.message.message_id)
+    # Pass control to the core download function, using the prompt message ID for status updates
+    await process_download_core(update, context, link, mode, message_id)
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -287,6 +319,7 @@ def run_setup():
     """Sets the webhook on the Telegram side using asyncio.run()."""
     logging.info("Starting bot configuration via synchronous runner...")
     try:
+        # We need to run this outside the gevent worker context, so asyncio.run is fine here.
         asyncio.run(_set_webhook_async())
         logging.info("Bot configuration complete. Ready for server startup.")
         
@@ -297,7 +330,7 @@ def run_setup():
 
 @app_flask.route(f"/{TOKEN}", methods=["POST"])
 def telegram_webhook():
-    """Handles incoming Telegram updates."""
+    """Handles incoming Telegram updates using gevent to bridge async PTB."""
     logging.info("DEBUG: Received incoming request on Flask webhook route. Attempting to process update.")
     
     try:
@@ -307,18 +340,22 @@ def telegram_webhook():
         
         update = Update.de_json(request.get_json(force=True), application.bot)
 
-        async def process_telegram_update():
+        async def process_telegram_update_wrapper():
+            """Wrapper to ensure application is initialized and processes the update."""
             if not application._initialized:
                 await application.initialize()
             
             await application.process_update(update)
 
-        asyncio.run(process_telegram_update())
+        # FIX: Replace asyncio.run() with gevent.spawn().get() to run the async PTB code
+        # within the gevent worker's context, preventing the "Event loop is closed" error.
+        gevent.spawn(process_telegram_update_wrapper).get()
         
         return "OK"
         
     except Exception as e:
         logging.error(f"Error processing webhook update: {e}", exc_info=True)
+        # Always return 200/OK to Telegram even if processing failed to prevent retries
         return "OK"
 
 @app_flask.route("/", methods=["GET", "HEAD"])
