@@ -1,10 +1,6 @@
-Flask
 python-telegram-bot
-gunicorn
 yt-dlp
-js2py
-pyjsparser
+Flask
+gunicorn
+gevent
 requests
-tornado
-tzlocal
-gevent  # <--- New required package for concurrent WSGI
