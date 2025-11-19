@@ -33,7 +33,7 @@ logging.getLogger("telegram").setLevel(logging.INFO)
 
 # Read token and webhook URL from environment variables
 # NOTE: Make sure these environment variables are correctly set in your deployment configuration.
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://your-app-name.onrender.com")
 
 # Initialize the bot Application globally
