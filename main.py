@@ -52,8 +52,9 @@ application = (
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message on /start."""
     if update.message:
+        # Note: Using escape characters (\\) for underscores/dots in MARKDOWN_V2
         await update.message.reply_text(
-            "Hello! Send me a link to download content\\. I'll try to extract the **audio** \\(up to ~50MB\\) and send it back\\.",
+            "Hello! Send me a link to download content\\. I'll try to extract the **audio** \\(up to \\~50MB\\) and send it back\\.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
 
@@ -110,6 +111,7 @@ async def downloader(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             chat_id=chat_id,
             message_id=download_message.message_id,
             text=f"Uploading audio: *{info_dict.get('title', 'Unknown Title')}*",
+            # Note: Using ParseMode.MARKDOWN for title/uploader updates
             parse_mode=ParseMode.MARKDOWN
         )
 
@@ -187,14 +189,13 @@ application.add_error_handler(error_handler)
 app_flask = Flask(__name__)
 
 async def _set_webhook_async():
-    """Internal async function to set the webhook and perform initialization."""
+    """Internal async function to set the webhook."""
     webhook_path = f"/{TOKEN}"
     full_webhook_url = WEBHOOK_URL.rstrip('/') + webhook_path
     
     logging.info(f"DEBUG: Using BOT TOKEN (first 10 chars): {TOKEN[:10]}...")
     logging.info(f"DEBUG: Calculated Webhook URL: {full_webhook_url}")
     
-    # We don't initialize here, as initialization must happen per worker.
     # We only use the application context to set the webhook URL.
     await application.bot.set_webhook(url=full_webhook_url)
     logging.info(f"Webhook successfully set to: {full_webhook_url}")
@@ -228,8 +229,9 @@ def telegram_webhook():
 
         # 2. Define an async task to handle the update
         async def process_telegram_update():
-            # CRITICAL FIX: Explicitly initialize the Application object in the worker process.
-            if not application.is_initialized():
+            # CRITICAL FIX: is_initialized() does not exist; check the private attribute directly.
+            # This ensures the Application is ready within the context of the running worker.
+            if not application._initialized:
                 await application.initialize()
             
             # Process the update
