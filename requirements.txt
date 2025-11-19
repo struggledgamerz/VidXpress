@@ -1,6 +1,10 @@
-python-telegram-bot[webhooks]==20.7
 Flask
-yt-dlp
-requests
-js2py
+python-telegram-bot
 gunicorn
+yt-dlp
+uvicorn  # <--- New required package
+js2py
+pyjsparser
+requests
+tornado
+tzlocal
