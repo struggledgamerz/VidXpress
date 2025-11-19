@@ -9,6 +9,9 @@ import logging
 import os
 import sys
 import asyncio
+import yt_dlp
+import tempfile
+import shutil
 
 from flask import Flask, request
 from telegram import Update
@@ -50,35 +53,109 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message on /start."""
     if update.message:
         await update.message.reply_text(
-            "Hello! Send me a link to download content.",
+            "Hello! Send me a link to download content\\. I'll try to extract the **audio** \\(up to ~50MB\\) and send it back\\.",
             parse_mode=ParseMode.MARKDOWN_V2
         )
 
 async def downloader(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the user's link, sends a 'wait' message, and simulates the download."""
+    """Downloads audio from a link using yt-dlp and uploads it to Telegram."""
     if not update.message:
         return
 
-    try:
-        # Acknowledge receipt of the link immediately
-        await update.message.reply_text("⏳ Downloading... Please wait.")
+    user_message = update.message
+    chat_id = user_message.chat_id
+    link = user_message.text
+    
+    download_message = await user_message.reply_text("⏳ Processing link and starting download... Please wait.")
 
-        # --- ACTUAL DOWNLOAD LOGIC WITH YT-DLP GOES HERE ---
-        link = update.message.text
-        logging.info(f"Received link for download: {link}")
-        
-        # NOTE: Implement your blocking yt-dlp logic here.
-        # Since gevent is patching, synchronous I/O should work within the worker.
-        
-        # Example using context.bot to send the final message
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"✅ Download simulation complete for: `{link}`"
+    # Create a temporary directory for the download
+    temp_dir = tempfile.mkdtemp()
+    
+    try:
+        logging.info(f"Received link for download: {link} in temp dir: {temp_dir}")
+
+        # yt-dlp options for downloading best audio format, max size 50MB
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'max_filesize': 50 * 1024 * 1024, # Limit to 50MB for Telegram direct upload
+            'restrictfilenames': True,
+            'noplaylist': True,
+            'verbose': False,
+            'logger': logging.getLogger('yt_dlp'),
+        }
+
+        # 1. Download the file using yt-dlp
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info_dict = ydl.extract_info(link, download=True)
+            
+            # Find the path to the downloaded MP3 file
+            mp3_files = [f for f in os.listdir(temp_dir) if f.endswith('.mp3')]
+            if mp3_files:
+                downloaded_file_path = os.path.join(temp_dir, mp3_files[0])
+            else:
+                # If no MP3 found, something failed in post-processing
+                raise FileNotFoundError("yt-dlp completed, but the expected MP3 file was not found in the temporary directory.")
+
+
+        # 2. Upload the file to Telegram
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=download_message.message_id,
+            text=f"Uploading audio: *{info_dict.get('title', 'Unknown Title')}*",
+            parse_mode=ParseMode.MARKDOWN
         )
 
+        with open(downloaded_file_path, 'rb') as audio_file:
+            await context.bot.send_audio(
+                chat_id=chat_id,
+                audio=audio_file,
+                title=info_dict.get('title', 'Downloaded Audio'),
+                performer=info_dict.get('uploader', 'Unknown'),
+                caption=f"Downloaded via the Bot\\. [Original Link]({link})",
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
+            
+        await context.bot.delete_message(chat_id=chat_id, message_id=download_message.message_id)
+        
+    except yt_dlp.utils.DownloadError as e:
+        error_msg = str(e)
+        if "size limit" in error_msg:
+             reply_text = "❌ Download Failed\\. The file size exceeds the 50MB limit\\. I can only download smaller audio tracks\\."
+        elif "Unsupported URL" in error_msg:
+            reply_text = "❌ Download Failed\\. The link provided is not supported by the downloader\\."
+        else:
+            # Mask detailed internal error, provide a generic message
+            reply_text = "❌ Download Failed\\. An error occurred during the extraction process\\."
+        
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=download_message.message_id,
+            text=reply_text,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+        logging.error(f"yt-dlp Download Error: {e}", exc_info=True)
+
     except Exception as e:
-        logging.error(f"Error in downloader for chat {update.effective_chat.id}: {e}", exc_info=True)
-        await update.message.reply_text("❌ An internal error occurred during the download process.")
+        logging.error(f"Error in downloader for chat {chat_id}: {e}", exc_info=True)
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=download_message.message_id,
+            text="❌ An internal error occurred during the download process\\.",
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+
+    finally:
+        # 3. CRITICAL: Clean up the temporary download folder
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+            logging.info(f"Cleaned up temporary directory: {temp_dir}")
+
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log the error and send a message to the user."""
@@ -87,7 +164,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         try:
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="🤖 Sorry, I ran into an error! Please try again later."
+                text="🤖 Sorry, I ran into an error! Please try again later\\.",
+                parse_mode=ParseMode.MARKDOWN_V2
             )
         except Exception as e:
             logging.error(f"Failed to send error message: {e}")
@@ -96,8 +174,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # --- Application Configuration ---
 
 application.add_handler(CommandHandler("start", start))
-# Handle all incoming text messages that look like a URL
-application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'https?://\S+'), downloader))
+# Handle all incoming text messages that look like a URL but are NOT commands
+application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'https?://\S+') & (~filters.COMMAND), downloader))
 application.add_error_handler(error_handler)
 
 
@@ -111,7 +189,9 @@ async def _set_webhook_async():
     webhook_path = f"/{TOKEN}"
     full_webhook_url = WEBHOOK_URL.rstrip('/') + webhook_path
     
-    # Use the async context manager for setup/teardown
+    logging.info(f"DEBUG: Using BOT TOKEN (first 10 chars): {TOKEN[:10]}...")
+    logging.info(f"DEBUG: Calculated Webhook URL: {full_webhook_url}")
+    
     async with application:
         await application.bot.set_webhook(url=full_webhook_url)
         logging.info(f"Webhook successfully set to: {full_webhook_url}")
@@ -127,7 +207,6 @@ def run_setup():
     except Exception as e:
         # Re-raise the exception after logging to ensure Gunicorn/Render stops the deploy
         logging.error(f"Failed to configure bot webhook: '{e}'")
-        # Exit with a non-zero status code to signal a failed startup
         sys.exit(1)
 
 
@@ -135,18 +214,23 @@ def run_setup():
 @app_flask.route(f"/{TOKEN}", methods=["POST"])
 def telegram_webhook():
     """Handles incoming Telegram updates."""
-    # Process the update using the Telegram Application instance
+    logging.info("DEBUG: Received incoming request on Flask webhook route. Attempting to process update.")
+    
     try:
         if not request.json:
+            logging.warning("Received request but JSON body was empty.")
             return "OK"
-            
+        
         update = Update.de_json(request.get_json(force=True), application.bot)
-        # Process the update asynchronously within the Gevent worker
-        application.process_update(update)
-        # Telegram expects an HTTP 200 response immediately
+
+        # CRITICAL FIX: The process_update method is an async coroutine 
+        # that must be explicitly run in this synchronous Flask context.
+        asyncio.run(application.process_update(update))
+        
+        # Telegram requires an immediate 200 OK response
         return "OK"
     except Exception as e:
-        # Log the error, but still return 200 to Telegram to prevent retry floods
+        # Log the error, but still return 200 to Telegram to prevent retry loops
         logging.error(f"Error processing webhook update: {e}", exc_info=True)
         return "OK"
 
@@ -159,4 +243,3 @@ def health_check():
 # The standard entry point for Gunicorn
 if __name__ == "__main__":
     run_setup()
-    # Gunicorn command: gunicorn --bind 0.0.0.0:$PORT main:app_flask --worker-class gevent
