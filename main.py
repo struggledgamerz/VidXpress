@@ -5,7 +5,6 @@ import asyncio
 from typing import Dict, Any
 
 from fastapi import FastAPI, Request, HTTPException
-# Import lifespan to manage application startup/shutdown
 from contextlib import asynccontextmanager 
 from telegram import Update
 from telegram.ext import (
@@ -17,8 +16,11 @@ from telegram.ext import (
 
 # --- Configuration ---
 # Use environment variables for sensitive data
+# Note: The deployment environment automatically provides the BOT_TOKEN
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY")
+# WEBHOOK_URL_BASE is the base URL of your deployed service (e.g., https://ff-like-bot-px1w.onrender.com)
 WEBHOOK_URL_BASE = os.environ.get("WEBHOOK_URL_BASE", "https://ff-like-bot-px1w.onrender.com")
+# PORT is provided by the environment (e.g., Render)
 PORT = int(os.environ.get("PORT", "8080")) 
 
 # The full webhook path Telegram will call
@@ -31,7 +33,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Application and Handlers (No Changes Here) ---
+# --- Application and Handlers ---
 
 async def start_command(update: Update, context: Application) -> None:
     """Sends a welcome message when the /start command is issued."""
@@ -50,6 +52,7 @@ async def echo_message(update: Update, context: Application) -> None:
 
 async def error_handler(update: Update, context: Application) -> None:
     """Log the error."""
+    # We log the error using the context's error attribute
     logger.error("Exception while handling an update:", exc_info=context.error)
 
 # --- PTB Application Setup ---
@@ -59,7 +62,7 @@ def build_application() -> Application:
     application = (
         Application.builder()
         .token(BOT_TOKEN)
-        .updater(None)  
+        .updater(None)  # Use None for webhook deployments
         .build()
     )
 
@@ -89,7 +92,7 @@ def run_setup():
     logger.info(f"DEBUG: Calculated Webhook URL: {WEBHOOK_URL}")
 
     async def set_webhook_async():
-        # IMPORTANT: Initialize must be called first if we're not running polling
+        # Initialize must be called first to allow bot calls
         await application.initialize() 
         await application.bot.set_webhook(
             url=WEBHOOK_URL,
@@ -99,38 +102,39 @@ def run_setup():
         )
         
     try:
+        # Create and run in a new event loop for this synchronous setup phase
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        # Note: We now call initialize() here too, but the one in the lifespan is the ultimate fix.
         loop.run_until_complete(set_webhook_async()) 
         logger.info(f"Webhook successfully set to: {WEBHOOK_URL}")
     except Exception as e:
         logger.error(f"Failed to set webhook: {e}")
-        # Allow the process to continue even if webhook setting failed, 
+        # We allow the process to continue even if webhook setting failed, 
         # as a previous webhook might still be active.
 
     logger.info("Bot configuration complete. Ready for server startup.")
 
 
-# --- FastAPI Web Server with Lifespan ---
+# --- FastAPI Web Server with Lifespan (The fix for the Runtime Error) ---
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Lifespan context manager runs code at application startup and shutdown.
-    This is the proper place to call PTB's initialize() in an ASGI app.
+    This ensures the PTB Application object is initialized within the main 
+    Uvicorn worker process's async event loop.
     """
     logger.info("FastAPI Startup: Calling Application.initialize()...")
-    # THE CRUCIAL FIX: Initialize the application within the main server process's async loop
+    # CRITICAL FIX for the 'Application was not initialized' error:
     await application.initialize()
-    logger.info("FastAPI Startup: Application initialized. Starting PTB async work...")
-    # Start the application's background tasks (internal updates, etc.)
+    logger.info("FastAPI Startup: Application initialized. Starting PTB async tasks...")
+    # Start the application's background tasks (necessary for job queue, etc.)
     await application.start()
     
-    yield # Server is running
+    yield # Server is running and ready to handle requests
     
     # Code below runs on application shutdown
-    logger.info("FastAPI Shutdown: Stopping PTB async work...")
+    logger.info("FastAPI Shutdown: Stopping PTB async tasks...")
     await application.stop()
     logger.info("FastAPI Shutdown complete.")
 
@@ -161,11 +165,12 @@ async def telegram_webhook(request: Request):
         update = Update.de_json(json_data, application.bot)
     except Exception as e:
         logger.error(f"Error creating Update object: {e}")
+        # Returning a response anyway
         return {"message": "Update creation failed, but request received"}
 
     # 3. Process the update asynchronously
     try:
-        # This now works because application.initialize() was called in the lifespan startup hook.
+        # This is where the handlers are executed asynchronously
         await application.process_update(update)
     except Exception as e:
         logger.error(f"Error processing update: {e}", exc_info=True)
@@ -177,8 +182,7 @@ async def telegram_webhook(request: Request):
 
 
 if __name__ == "__main__":
-    # Local running block (unlikely to be used in production setup like Render)
-    # Ensure this block is removed or protected if not needed.
+    # Local running block - not executed during standard deployment, but useful for testing
     try:
         import uvicorn
         logger.info("Running setup...")
@@ -186,20 +190,6 @@ if __name__ == "__main__":
         logger.info("Starting local server with Uvicorn...")
         uvicorn.run(app_fastapi, host="0.0.0.0", port=PORT)
     except ImportError:
-        logger.error("Uvicorn is not installed. Please check requirements.txt.")
+        logger.error("Uvicorn is not installed.")
     except KeyboardInterrupt:
         logger.info("Bot stopped by user.")
-```eof
-
-### Summary of the Fix:
-
-* **`lifespan` Function:** I added an `asynccontextmanager` named `lifespan` to the FastAPI app initialization.
-* **Startup Hook:** Inside the `lifespan` function's setup part (before `yield`), we now have:
-    ```python
-    await application.initialize()
-    await application.start() 
-    ```
-* **Why this works:** The `lifespan` event runs **asynchronously** within the main Uvicorn worker process *before* the first request is served. This correctly initializes the `Application` object for the worker, resolving the `RuntimeError`.
-
-Your bot should now be fully functional and ready to handle updates asynchronously!
-        
