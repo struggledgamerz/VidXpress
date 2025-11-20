@@ -95,7 +95,7 @@ async def button_callback_handler(update: Update, context: Application) -> None:
         return
 
     # Give immediate feedback that processing has started
-    await query.edit_message_text("🚀 Fetching download link...\n\n_This may take a moment. We're using specialized mobile client settings to bypass restrictions._")
+    await query.edit_message_text("🚀 Fetching download link...\n\n_This may take a moment. We're now using a highly resilient 'web' client setting to bypass restrictions._")
     
     try:
         # Split the callback data: e.g., "download_video|https://..."
@@ -126,12 +126,16 @@ async def button_callback_handler(update: Update, context: Application) -> None:
             # --- CRITICAL FIXES FOR YOUTUBE ERRORS (Sign In/Bot Detection) ---
             'extractor_args': {
                 'youtube': {
-                    # Swapping to the 'android' client is a common fix for sign-in prompts
-                    'player_client': 'android', 
+                    # Swapping to the 'web' client, a stable fallback that often bypasses bot checks
+                    'player_client': 'web', 
                     'check_content': False, # Skip age and content checks that often fail
-                    'force_old_query': True # Sometimes helps with shorts and age-restricted links
+                    'force_old_query': True, # Sometimes helps with shorts and age-restricted links
+                    'skip_hls_media': True, # Skip HLS media segments which can be restrictive
                 }
             },
+            # Force generic extraction for maximum resilience, using basic HTML parsing
+            'force_generic_extractor': True, 
+            
             # Use IPv4 only for network stability
             'force_ipv4': True, 
         }
