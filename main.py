@@ -21,6 +21,7 @@ try:
     import yt_dlp
     from yt_dlp.utils import DownloadError # Import specific error for better handling
 except ImportError:
+    # This scenario should not happen if requirements.txt is correct, but kept for robustness
     print("FATAL: yt-dlp is not installed. Video download functionality will fail.")
 
 
@@ -94,7 +95,7 @@ async def button_callback_handler(update: Update, context: Application) -> None:
         return
 
     # Give immediate feedback that processing has started
-    await query.edit_message_text("🚀 Fetching download link...\n\n_This may take a moment. We're using specialized settings to bypass bot detection._")
+    await query.edit_message_text("🚀 Fetching download link...\n\n_This may take a moment. We're using specialized mobile client settings to bypass restrictions._")
     
     try:
         # Split the callback data: e.g., "download_video|https://..."
@@ -102,11 +103,11 @@ async def button_callback_handler(update: Update, context: Application) -> None:
         
         # Configure yt-dlp options based on the requested action
         if action == 'download_video':
-            # Format Selector: Prioritize best muxed MP4 < 1080p, then fall back to best overall stream
-            format_selector = 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+            # Format Selector: Use best available video and audio, prioritizing MP4/m4a muxing
+            format_selector = 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best'
         elif action == 'download_audio':
-            # Format Selector: Prioritize best M4A, then WebM, then best audio
-            format_selector = 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best'
+            # Format Selector: Prioritize best M4A, then best available audio
+            format_selector = 'bestaudio[ext=m4a]/bestaudio/best'
         else:
             await query.edit_message_text("❌ Unknown action requested.")
             return
@@ -118,24 +119,20 @@ async def button_callback_handler(update: Update, context: Application) -> None:
             'quiet': True,
             'noplaylist': True,
             'logger': logging.getLogger('yt-dlp.quiet'), 
-            
-            # --- Robustness Settings to solve log errors ---
-            'retries': 10, # Increased retries
+            'retries': 10, 
             'no_check_formats': True, 
             'simulate': True,
             
-            # CRITICAL FIXES FOR YOUTUBE ERRORS
-            # 1. Use 'default' client to bypass missing JS runtime warning
-            # 2. Add 'check_content: False' to bypass age/bot confirmation that prevents metadata fetch
+            # --- CRITICAL FIXES FOR YOUTUBE ERRORS (Sign In/Bot Detection) ---
             'extractor_args': {
                 'youtube': {
-                    'player_client': 'default', 
-                    'check_content': False,
-                    # Fallback on the original extractor if the default client fails
-                    'skip_player_errors': True 
+                    # Swapping to the 'android' client is a common fix for sign-in prompts
+                    'player_client': 'android', 
+                    'check_content': False, # Skip age and content checks that often fail
+                    'force_old_query': True # Sometimes helps with shorts and age-restricted links
                 }
             },
-            # Use IPv4 only for network stability if the host's IPv6 is causing issues
+            # Use IPv4 only for network stability
             'force_ipv4': True, 
         }
         
@@ -150,8 +147,8 @@ async def button_callback_handler(update: Update, context: Application) -> None:
         download_url = None
 
         # 1. Check the 'requested_formats' for muxed streams (CRUCIAL for YouTube video)
-        # The last element of requested_formats often contains the final combined stream's URL
         if info.get('requested_formats'):
+            # The last element of requested_formats often contains the final combined stream's URL
             last_requested_format = info['requested_formats'][-1]
             download_url = last_requested_format.get('url')
         
@@ -189,7 +186,7 @@ async def button_callback_handler(update: Update, context: Application) -> None:
              user_friendly_error = (
                  f"⚠️ **Cannot access the video.**\n\n"
                  "The video is likely **age-restricted**, **private**, or **geoblocked**.\n\n"
-                 "_The server cannot sign in or bypass these restrictions._"
+                 "_The server cannot sign in or bypass these restrictions. The mobile client bypass failed._"
              )
         else:
             user_friendly_error = (
