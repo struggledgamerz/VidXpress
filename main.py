@@ -5,36 +5,38 @@ import shutil
 import concurrent.futures
 from urllib.parse import urlparse
 
-# Import the main download function from the local file
-from download_manager import download_media, logger as download_logger
-
-# Import telegram libraries
+# --- Telegram/Web Framework Imports ---
+from fastapi import FastAPI, Request, Response, HTTPException
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
 
+# Import the main download function from the local file
+from download_manager import download_media, logger as download_logger
+
 # --- Configuration ---
 # You MUST replace 'YOUR_BOT_TOKEN_HERE' with your actual Telegram bot token.
-# Using an environment variable is safer in production.
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY") 
+WEBHOOK_URL = os.environ.get("WEBHOOK_BASE_URL", "https://ff-like-bot-px1w.onrender.com")
+PORT = int(os.environ.get("PORT", "8080")) # Default port for Uvicorn
 
 # Set up main logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-# Use a custom logger for the bot
 bot_logger = logging.getLogger('TelegramBot')
-# Set the download manager logger level higher to only show serious issues in the console
 download_logger.setLevel(logging.WARNING) 
 
+# --- Global State ---
+# Initialize FastAPI app and Telegram Application globally
+app_fastapi = FastAPI()
+application = None 
 
 # --- Thread Pool Executor ---
-# Use a thread pool to handle media downloads in the background, preventing the bot 
-# from freezing while waiting for large files.
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
 
-# --- Handlers ---
+# --- Handlers (Identical to previous version) ---
 
 async def start_command(update: Update, context: CallbackContext) -> None:
     """Sends a welcome message when the /start command is issued."""
@@ -47,7 +49,6 @@ async def start_command(update: Update, context: CallbackContext) -> None:
 
 def extract_url(text):
     """Simple regex to extract the first URL from a string."""
-    # This regex looks for http or https links
     urls = re.findall(r'https?://[^\s]+', text)
     return urls[0] if urls else None
 
@@ -57,7 +58,6 @@ async def handle_url(update: Update, context: CallbackContext) -> None:
     url = extract_url(text)
 
     if not url:
-        # Should not happen often if the filter is set correctly, but acts as a safeguard
         await update.message.reply_text("Please send a valid URL.")
         return
 
@@ -173,27 +173,111 @@ async def send_media_callback(result: tuple, args: dict):
                 bot_logger.error(f"Error cleaning up temp directory {temp_dir}: {e}")
 
 
-def main() -> None:
-    """Start the bot."""
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        bot_logger.error("Please set the TELEGRAM_BOT_TOKEN environment variable or replace the placeholder in main.py.")
-        return
+# --- Telegram Bot Setup (Function called by run_setup) ---
 
-    # Create the Application and pass it your bot's token.
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    # --- Handlers ---
-    application.add_handler(CommandHandler("start", start_command))
+def setup_bot():
+    """Initializes the Telegram Application, handlers, and webhook."""
+    global application
     
-    # Message handler for any text containing a URL
+    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE" or WEBHOOK_URL == "https://your-app-name.onrender.com":
+        bot_logger.error("!!! CONFIGURATION ERROR: Please set TELEGRAM_BOT_TOKEN and WEBHOOK_URL environment variables. !!!")
+        # Exit silently if configuration is missing to prevent infinite error loops
+        return None
+
+    # 1. Build the Telegram Application
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .updater(None) # Crucial: disable internal polling updater
+        .build()
+    )
+
+    # 2. Add Handlers
+    application.add_handler(CommandHandler("start", start_command))
     application.add_handler(
         MessageHandler(filters.TEXT & filters.URL & ~filters.COMMAND, handle_url)
     )
+    
+    # 3. Set Webhook
+    # The URL where Telegram will send updates
+    webhook_path = "/webhook"
+    webhook_url = WEBHOOK_URL + webhook_path
+    
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=webhook_path,
+        webhook_url=webhook_url,
+    )
 
-    # Run the bot until the user presses Ctrl-C
-    bot_logger.info("Bot started successfully. Listening for messages...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    bot_logger.info(f"Webhook set to: {webhook_url}")
+    return application
 
+
+# --- Deployment Entry Points ---
+
+# Placeholder function required by the deployment command: python3 -c "import main; main.run_setup()"
+def run_setup():
+    """Initializes and configures the bot for webhook deployment."""
+    global application
+    application = setup_bot()
+    bot_logger.info("Bot setup complete (Webhooks configured).")
+
+
+# FastAPI route to receive Telegram updates
+@app_fastapi.post("/webhook")
+async def telegram_webhook(request: Request):
+    """Handles incoming Telegram updates via the webhook."""
+    global application
+    
+    if not application:
+        raise HTTPException(status_code=503, detail="Bot not initialized. Check run_setup.")
+        
+    try:
+        # Get the update data from the request body
+        update_json = await request.json()
+        
+        # Convert JSON data to Telegram Update object
+        update = Update.de_json(update_json, application.bot)
+        
+        # Process the update using the Application's dispatcher
+        await application.update_queue.put(update)
+
+        return Response(status_code=200)
+
+    except Exception as e:
+        bot_logger.error(f"Error processing webhook update: {e}")
+        # Telegram expects a 200 OK even on error to prevent constant retries
+        return Response(status_code=200)
+
+
+# --- Local Execution (Polling Fallback) ---
 
 if __name__ == "__main__":
-    main()
+    """Runs the bot in polling mode for local development."""
+    bot_logger.info("Starting bot in LOCAL POLLING MODE...")
+    
+    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+        bot_logger.error("Please set the TELEGRAM_BOT_TOKEN environment variable or replace the placeholder in main.py.")
+        exit()
+
+    try:
+        # Initialize the Application
+        application = (
+            Application.builder()
+            .token(BOT_TOKEN)
+            .build()
+        )
+        
+        # Add Handlers
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(
+            MessageHandler(filters.TEXT & filters.URL & ~filters.COMMAND, handle_url)
+        )
+        
+        # Start the Polling loop
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        
+    except Exception as e:
+        bot_logger.error(f"Failed to start bot in polling mode: {e}")
+        
