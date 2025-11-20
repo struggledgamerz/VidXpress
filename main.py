@@ -4,7 +4,7 @@ import logging
 import shutil
 import concurrent.futures
 import asyncio
-from contextlib import asynccontextmanager # New import for FastAPI lifespan
+from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
 # --- Telegram/Web Framework Imports ---
@@ -34,7 +34,7 @@ download_logger.setLevel(logging.WARNING)
 application: Application = None 
 
 # --- Thread Pool Executor ---
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
+executor = concurrent.futures.ThreadPoolPoolExecutor(max_workers=5)
 
 
 # --- Handlers (Unchanged) ---
@@ -83,20 +83,30 @@ def execute_callback(future: concurrent.futures.Future, callback_args: dict):
     """
     Callback executed when the download_media thread finishes.
     This function prepares the result and calls the asynchronous send_media_callback.
+    
+    Crucially uses application.update_queue.get_loop().create_task() to schedule
+    the async Telegram response onto the main event loop.
     """
+    context = callback_args['context']
     try:
+        # Retrieve the result (filepath, temp_dir) from the future
         result = future.result()
-        context = callback_args['context']
-        # Use application.loop to schedule the async task safely
-        context.application.loop.create_task(send_media_callback(result, callback_args))
+        
+        # Schedule the async callback onto the Application's event loop
+        context.application.update_queue.get_loop().create_task(
+            send_media_callback(result, callback_args)
+        )
     except Exception as e:
         bot_logger.error(f"Error executing callback: {e}")
-        context = callback_args['context']
-        context.application.loop.create_task(
+        
+        # If an error occurs (e.g., yt-dlp failed), ensure the error message is sent
+        # and the task is scheduled correctly onto the Application's event loop.
+        context.application.update_queue.get_loop().create_task(
             context.bot.edit_message_text(
                 chat_id=callback_args['chat_id'],
                 message_id=callback_args['status_message_id'],
-                text="An unexpected error occurred during processing. Please try again."
+                # Provide a more specific error for the user if available
+                text=f"An unexpected error occurred during processing: {str(e)}"
             )
         )
 
@@ -117,7 +127,7 @@ async def send_media_callback(result: tuple, args: dict):
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_message_id,
-                text="❌ Could not download media from the provided URL. The link may be invalid or restricted."
+                text="❌ Could not download media from the provided URL. The link may be invalid or restricted. (Check for sign-in requirements or region locks.)"
             )
             return
 
@@ -175,6 +185,10 @@ async def send_media_callback(result: tuple, args: dict):
 async def init_bot_async() -> Application:
     """Initializes the Telegram Application and handlers."""
     
+    # Check configuration for deployment only
+    if BOT_TOKEN == "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY" or WEBHOOK_URL == "https://ff-like-bot-px1w.onrender.com":
+        bot_logger.warning("Configuration variables are using hardcoded fallbacks. Ensure you set environment variables for production.")
+
     # 1. Build the Telegram Application
     app = (
         Application.builder()
@@ -188,7 +202,11 @@ async def init_bot_async() -> Application:
 
     # 2. Add Handlers
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
+    
+    # Use filters.TEXT and rely on the internal extract_url check
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url)
+    )
     
     return app
 
