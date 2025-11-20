@@ -3,6 +3,7 @@ import re
 import logging
 import shutil
 import concurrent.futures
+import asyncio # New import for running async setup
 from urllib.parse import urlparse
 
 # --- Telegram/Web Framework Imports ---
@@ -15,10 +16,8 @@ from download_manager import download_media, logger as download_logger
 
 # --- Configuration ---
 # NOTE: The token is securely retrieved from the environment variable TELEGRAM_BOT_TOKEN.
-# The user-provided token is set as a fallback for local testing.
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY") 
-# The deployment URL provided by the user is used here.
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL_BASE", "https://ff-like-bot-px1w.onrender.com")
+WEBHOOK_URL = os.environ.get("WEBHOOK_BASE_URL", "https://ff-like-bot-px1w.onrender.com")
 PORT = int(os.environ.get("PORT", "8080")) # Default port for Uvicorn
 
 # Set up main logging
@@ -177,8 +176,11 @@ async def send_media_callback(result: tuple, args: dict):
 
 # --- Telegram Bot Setup (Function called by run_setup) ---
 
-def setup_bot():
-    """Initializes the Telegram Application, handlers, and webhook."""
+async def setup_bot():
+    """
+    Initializes the Telegram Application, handlers, and manually sets the webhook.
+    This function is now asynchronous.
+    """
     global application
     
     # Check configuration for deployment only
@@ -192,6 +194,9 @@ def setup_bot():
         .updater(None) # Crucial: disable internal polling updater
         .build()
     )
+    
+    # Initialize Application's internal state (required before calling bot methods)
+    await application.initialize()
 
     # 2. Add Handlers
     application.add_handler(CommandHandler("start", start_command))
@@ -201,17 +206,12 @@ def setup_bot():
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url)
     )
     
-    # 3. Set Webhook
+    # 3. Manually Set Webhook URL (avoiding application.run_webhook)
     webhook_path = "/webhook"
     webhook_url = WEBHOOK_URL + webhook_path
     
-    # We call run_webhook to configure the server environment
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=webhook_path,
-        webhook_url=webhook_url,
-    )
+    # This is the correct method when using an external server like Uvicorn
+    await application.bot.set_webhook(url=webhook_url)
 
     bot_logger.info(f"Webhook set to: {webhook_url}")
     return application
@@ -219,11 +219,23 @@ def setup_bot():
 
 # --- Deployment Entry Points ---
 
-# Placeholder function required by the deployment command: python3 -c "import main; main.run_setup()"
+# Function required by the deployment command: python3 -c "import main; main.run_setup()"
 def run_setup():
-    """Initializes and configures the bot for webhook deployment."""
+    """
+    Synchronously runs the async setup_bot function to initialize the app and set the webhook.
+    """
     global application
-    application = setup_bot()
+    
+    # Use a new event loop to run the async setup synchronously
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    # Run the asynchronous setup function
+    application = loop.run_until_complete(setup_bot())
+    
     bot_logger.info("Bot setup complete (Webhooks configured).")
 
 
@@ -234,7 +246,6 @@ async def telegram_webhook(request: Request):
     global application
     
     if not application:
-        # If application hasn't been initialized (e.g., setup failed), return 503
         raise HTTPException(status_code=503, detail="Bot not initialized. Check run_setup.")
         
     try:
