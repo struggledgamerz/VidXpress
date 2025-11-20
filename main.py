@@ -2,30 +2,40 @@ import logging
 import os
 import sys
 import asyncio
+import re
 from typing import Dict, Any
 
 from fastapi import FastAPI, Request, HTTPException
 from contextlib import asynccontextmanager 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, 
     CommandHandler, 
     MessageHandler, 
+    CallbackQueryHandler, # NEW
     filters
 )
 
+# Third-party library for media extraction
+try:
+    import yt_dlp
+except ImportError:
+    # This block is for safety, but yt-dlp should be in your requirements.txt
+    print("FATAL: yt-dlp is not installed. Video download functionality will fail.")
+
+
 # --- Configuration ---
-# Use environment variables for sensitive data
-# Note: The deployment environment automatically provides the BOT_TOKEN
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY")
-# WEBHOOK_URL_BASE is the base URL of your deployed service (e.g., https://ff-like-bot-px1w.onrender.com)
 WEBHOOK_URL_BASE = os.environ.get("WEBHOOK_URL_BASE", "https://ff-like-bot-px1w.onrender.com")
-# PORT is provided by the environment (e.g., Render)
 PORT = int(os.environ.get("PORT", "8080")) 
 
-# The full webhook path Telegram will call
 WEBHOOK_PATH = f"/{BOT_TOKEN}"
 WEBHOOK_URL = f"{WEBHOOK_URL_BASE}{WEBHOOK_PATH}"
+
+# Regular expression to match common video/YouTube URLs
+YOUTUBE_URL_REGEX = re.compile(
+    r'(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/shorts\/|facebook\.com|twitch\.tv|vimeo\.com|dailymotion\.com|tiktok\.com\/)([\w\-\/]+)'
+)
 
 # Set up logging
 logging.basicConfig(
@@ -33,26 +43,120 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Application and Handlers ---
+# --- Handlers ---
 
 async def start_command(update: Update, context: Application) -> None:
-    """Sends a welcome message when the /start command is issued."""
+    """Sends a welcome message and instructions when the /start command is issued."""
     logger.info(f"Received /start from user {update.effective_user.id}")
     await update.message.reply_text(
-        "Welcome! I'm running on a speedy asynchronous server (Uvicorn/FastAPI). "
-        "Send me any text!"
+        "👋 Welcome! I can fetch direct download links for videos from many popular sites (like YouTube).\n\n"
+        "Just send me a video link, and I'll give you options for video or audio download."
     )
 
-async def echo_message(update: Update, context: Application) -> None:
-    """Echoes the user's message."""
-    logger.info(f"Received message from user {update.effective_user.id}: {update.message.text}")
+async def url_handler(update: Update, context: Application) -> None:
+    """Checks for a URL and provides download buttons if found, otherwise echoes the text."""
     text = update.message.text
-    if text:
+    match = YOUTUBE_URL_REGEX.search(text)
+
+    if match:
+        url = match.group(0)
+        
+        # Data format: "action|url"
+        video_callback_data = f"download_video|{url}"
+        audio_callback_data = f"download_audio|{url}"
+
+        keyboard = [
+            [
+                InlineKeyboardButton("🎥 Download Video (MP4)", callback_data=video_callback_data),
+                InlineKeyboardButton("🎵 Download Audio (MP3)", callback_data=audio_callback_data)
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            f"Found a link! Please select the format you want.",
+            reply_markup=reply_markup
+        )
+    else:
+        # Fallback echo logic for non-URLs
         await update.message.reply_text(f"You said: {text}")
+
+
+async def button_callback_handler(update: Update, context: Application) -> None:
+    """Handles button clicks to retrieve the direct download link using yt-dlp."""
+    query = update.callback_query
+    await query.answer() # Always answer the callback query to dismiss the loading state
+    
+    # Check if data exists and contains the separator
+    if not query.data or "|" not in query.data:
+        await query.edit_message_text("❌ Invalid callback data.")
+        return
+
+    try:
+        # Split the callback data: e.g., "download_video|https://..."
+        action, url = query.data.split("|", 1)
+        
+        # Give immediate feedback that processing has started
+        await query.edit_message_text(f"🚀 Fetching download link for: `{url}`\n\n_This may take a moment..._")
+        
+        # Configure yt-dlp options based on the requested action
+        if action == 'download_video':
+            # Select best quality video and audio, preferred format MP4
+            format_selector = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+        elif action == 'download_audio':
+            # Select best audio quality, then convert to mp3 in memory if possible (yt-dlp handles this)
+            format_selector = 'bestaudio/best'
+        else:
+            await query.edit_message_text("❌ Unknown action requested.")
+            return
+
+        # yt-dlp options for link extraction (not actual download)
+        ydl_opts = {
+            'format': format_selector,
+            'skip_download': True,
+            'quiet': True,
+            'noplaylist': True,
+            'force_generic_extractor': True,
+            # Suppress yt-dlp logging to keep console clean
+            'logger': logging.getLogger('yt-dlp.quiet') 
+        }
+        
+        # Run yt-dlp extraction
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Running this asynchronously is crucial to avoid blocking the Uvicorn worker
+            info = await asyncio.to_thread(ydl.extract_info, url, download=False)
+            
+        # Extract the title and the final URL
+        title = info.get('title', 'Your Requested File')
+        
+        # Check if the desired format is present
+        if 'url' in info:
+            download_url = info['url']
+        elif 'formats' in info and info['formats']:
+            # For some sites, the best format is in the list
+            download_url = info['formats'][-1].get('url') # Try to get the last (often best) URL
+        else:
+            download_url = None
+
+        if download_url:
+            message = (
+                f"✅ **{title}** ready!\n\n"
+                f"📥 **Download Link ({'Video (MP4)' if action == 'download_video' else 'Audio (MP3)'}):**\n"
+                f"**[Click to Download]({download_url})**\n\n"
+                f"`{download_url}`\n\n" # Also provide the link as raw text for easy copy
+                f"_Note: The link is valid for a limited time._"
+            )
+            await query.edit_message_text(message, parse_mode='Markdown')
+        else:
+            await query.edit_message_text("❌ Could not find a direct download link. The content might be geoblocked, private, or unsupported by the service.")
+
+    except Exception as e:
+        logger.error(f"Error in callback handler: {e}", exc_info=True)
+        # Inform the user about the failure
+        await query.edit_message_text(f"❌ An internal error occurred while processing the link. ({e.__class__.__name__})")
 
 async def error_handler(update: Update, context: Application) -> None:
     """Log the error."""
-    # We log the error using the context's error attribute
     logger.error("Exception while handling an update:", exc_info=context.error)
 
 # --- PTB Application Setup ---
@@ -62,13 +166,16 @@ def build_application() -> Application:
     application = (
         Application.builder()
         .token(BOT_TOKEN)
-        .updater(None)  # Use None for webhook deployments
+        .updater(None)  
         .build()
     )
 
     # Register handlers
     application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_message))
+    # Handle button clicks
+    application.add_handler(CallbackQueryHandler(button_callback_handler)) 
+    # Handle all text messages that are not commands (now includes URL detection)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, url_handler))
     application.add_error_handler(error_handler)
     
     return application
@@ -79,11 +186,7 @@ application = build_application()
 # --- Webhook Setup Function (Runs ONLY before Uvicorn starts) ---
 
 def run_setup():
-    """
-    Synchronous setup function called by the deployment environment 
-    to set the webhook URL before the Uvicorn server starts.
-    This runs the webhook setting operation.
-    """
+    """Synchronous setup function to set the webhook URL."""
     if "YOUR_BOT_TOKEN_HERE" in BOT_TOKEN:
         logger.error("FATAL: BOT_TOKEN is not configured! Cannot set webhook.")
         sys.exit(1)
@@ -92,7 +195,6 @@ def run_setup():
     logger.info(f"DEBUG: Calculated Webhook URL: {WEBHOOK_URL}")
 
     async def set_webhook_async():
-        # Initialize must be called first to allow bot calls
         await application.initialize() 
         await application.bot.set_webhook(
             url=WEBHOOK_URL,
@@ -102,38 +204,31 @@ def run_setup():
         )
         
     try:
-        # Create and run in a new event loop for this synchronous setup phase
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(set_webhook_async()) 
         logger.info(f"Webhook successfully set to: {WEBHOOK_URL}")
     except Exception as e:
         logger.error(f"Failed to set webhook: {e}")
-        # We allow the process to continue even if webhook setting failed, 
-        # as a previous webhook might still be active.
 
     logger.info("Bot configuration complete. Ready for server startup.")
 
 
-# --- FastAPI Web Server with Lifespan (The fix for the Runtime Error) ---
+# --- FastAPI Web Server with Lifespan ---
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Lifespan context manager runs code at application startup and shutdown.
-    This ensures the PTB Application object is initialized within the main 
-    Uvicorn worker process's async event loop.
+    Ensures the PTB Application object is initialized and started 
+    within the main Uvicorn worker process's async event loop.
     """
     logger.info("FastAPI Startup: Calling Application.initialize()...")
-    # CRITICAL FIX for the 'Application was not initialized' error:
     await application.initialize()
     logger.info("FastAPI Startup: Application initialized. Starting PTB async tasks...")
-    # Start the application's background tasks (necessary for job queue, etc.)
     await application.start()
     
-    yield # Server is running and ready to handle requests
+    yield 
     
-    # Code below runs on application shutdown
     logger.info("FastAPI Shutdown: Stopping PTB async tasks...")
     await application.stop()
     logger.info("FastAPI Shutdown complete.")
@@ -165,7 +260,6 @@ async def telegram_webhook(request: Request):
         update = Update.de_json(json_data, application.bot)
     except Exception as e:
         logger.error(f"Error creating Update object: {e}")
-        # Returning a response anyway
         return {"message": "Update creation failed, but request received"}
 
     # 3. Process the update asynchronously
@@ -182,7 +276,6 @@ async def telegram_webhook(request: Request):
 
 
 if __name__ == "__main__":
-    # Local running block - not executed during standard deployment, but useful for testing
     try:
         import uvicorn
         logger.info("Running setup...")
