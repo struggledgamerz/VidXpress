@@ -2,7 +2,7 @@ import os
 import re
 import logging
 import shutil
-import concurrent.futures # Import concurrent.futures for the executor
+import concurrent.futures
 import asyncio
 from contextlib import asynccontextmanager
 
@@ -33,7 +33,6 @@ download_logger.setLevel(logging.WARNING)
 application: Application = None 
 
 # --- Thread Pool Executor ---
-# FIX: Corrected typo from ThreadPoolPoolExecutor to ThreadPoolExecutor
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
 
@@ -84,8 +83,8 @@ def execute_callback(future: concurrent.futures.Future, callback_args: dict):
     Callback executed when the download_media thread finishes.
     This function prepares the result and calls the asynchronous send_media_callback.
     
-    Crucially uses application.update_queue.get_loop().create_task() to schedule
-    the async Telegram response onto the main event loop.
+    FIX: Changed .get_loop() to ._get_loop() to access the internal asyncio queue loop
+    when scheduling an async task from the sync thread pool.
     """
     context = callback_args['context']
     try:
@@ -93,7 +92,7 @@ def execute_callback(future: concurrent.futures.Future, callback_args: dict):
         result = future.result()
         
         # Schedule the async callback onto the Application's event loop
-        context.application.update_queue.get_loop().create_task(
+        context.application.update_queue._get_loop().create_task(
             send_media_callback(result, callback_args)
         )
     except Exception as e:
@@ -101,7 +100,7 @@ def execute_callback(future: concurrent.futures.Future, callback_args: dict):
         
         # If an error occurs (e.g., yt-dlp failed), ensure the error message is sent
         # and the task is scheduled correctly onto the Application's event loop.
-        context.application.update_queue.get_loop().create_task(
+        context.application.update_queue._get_loop().create_task(
             context.bot.edit_message_text(
                 chat_id=callback_args['chat_id'],
                 message_id=callback_args['status_message_id'],
