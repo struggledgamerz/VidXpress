@@ -2,10 +2,9 @@ import os
 import re
 import logging
 import shutil
-import concurrent.futures
+import concurrent.futures # Import concurrent.futures for the executor
 import asyncio
 from contextlib import asynccontextmanager
-from urllib.parse import urlparse
 
 # --- Telegram/Web Framework Imports ---
 from fastapi import FastAPI, Request, Response, HTTPException
@@ -34,7 +33,8 @@ download_logger.setLevel(logging.WARNING)
 application: Application = None 
 
 # --- Thread Pool Executor ---
-executor = concurrent.futures.ThreadPoolPoolExecutor(max_workers=5)
+# FIX: Corrected typo from ThreadPoolPoolExecutor to ThreadPoolExecutor
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
 
 # --- Handlers (Unchanged) ---
