@@ -12,15 +12,15 @@ from telegram.ext import (
     Application, 
     CommandHandler, 
     MessageHandler, 
-    CallbackQueryHandler, # NEW
+    CallbackQueryHandler,
     filters
 )
 
 # Third-party library for media extraction
 try:
     import yt_dlp
+    from yt_dlp.utils import DownloadError # Import specific error for better handling
 except ImportError:
-    # This block is for safety, but yt-dlp should be in your requirements.txt
     print("FATAL: yt-dlp is not installed. Video download functionality will fail.")
 
 
@@ -101,10 +101,8 @@ async def button_callback_handler(update: Update, context: Application) -> None:
         
         # Configure yt-dlp options based on the requested action
         if action == 'download_video':
-            # Select best quality video and audio, preferred format MP4
             format_selector = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
         elif action == 'download_audio':
-            # Select best audio quality, then convert to mp3 in memory if possible (yt-dlp handles this)
             format_selector = 'bestaudio/best'
         else:
             await query.edit_message_text("❌ Unknown action requested.")
@@ -117,8 +115,12 @@ async def button_callback_handler(update: Update, context: Application) -> None:
             'quiet': True,
             'noplaylist': True,
             'force_generic_extractor': True,
-            # Suppress yt-dlp logging to keep console clean
-            'logger': logging.getLogger('yt-dlp.quiet') 
+            'logger': logging.getLogger('yt-dlp.quiet'), 
+            # NEW ROBUSTNESS FLAGS:
+            'retries': 5, # Retry failed network connections
+            'no_check_formats': True, # Skip strict format checks which can fail in non-browser environments
+            # Attempting to bypass JS runtime issues
+            'extractor_args': {'youtube': {'player_client': 'default'}},
         }
         
         # Run yt-dlp extraction
@@ -150,10 +152,29 @@ async def button_callback_handler(update: Update, context: Application) -> None:
         else:
             await query.edit_message_text("❌ Could not find a direct download link. The content might be geoblocked, private, or unsupported by the service.")
 
+    except DownloadError as e: # Catch the specific yt-dlp error
+        logger.error(f"yt-dlp DownloadError for {url}: {e}")
+        # Custom message for the user explaining the likely cause
+        error_message = str(e)
+        if "Sign in to confirm" in error_message or "confirm your age" in error_message:
+             user_friendly_error = (
+                 f"⚠️ **Cannot access the video.**\n\n"
+                 "The video is likely **age-restricted**, **private**, or **geoblocked**.\n\n"
+                 "_The server cannot sign in or bypass these restrictions._"
+             )
+        else:
+            # Catch other download-related errors (e.g., video deleted)
+            user_friendly_error = (
+                 f"❌ **Download Extraction Failed.**\n\n"
+                 "The video link might be broken, unsupported, or the content has been removed."
+             )
+        
+        await query.edit_message_text(user_friendly_error, parse_mode='Markdown')
+
     except Exception as e:
         logger.error(f"Error in callback handler: {e}", exc_info=True)
         # Inform the user about the failure
-        await query.edit_message_text(f"❌ An internal error occurred while processing the link. ({e.__class__.__name__})")
+        await query.edit_message_text(f"❌ An unexpected error occurred while processing the link. ({e.__class__.__name__})")
 
 async def error_handler(update: Update, context: Application) -> None:
     """Log the error."""
@@ -172,9 +193,7 @@ def build_application() -> Application:
 
     # Register handlers
     application.add_handler(CommandHandler("start", start_command))
-    # Handle button clicks
     application.add_handler(CallbackQueryHandler(button_callback_handler)) 
-    # Handle all text messages that are not commands (now includes URL detection)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, url_handler))
     application.add_error_handler(error_handler)
     
