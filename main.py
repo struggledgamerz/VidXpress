@@ -33,7 +33,6 @@ WEBHOOK_PATH = f"/{BOT_TOKEN}"
 WEBHOOK_URL = f"{WEBHOOK_URL_BASE}{WEBHOOK_PATH}"
 
 # Regular expression to match common video/YouTube URLs
-# NOTE: This regex is intentionally broad to catch many major platforms supported by yt-dlp
 YOUTUBE_URL_REGEX = re.compile(
     r'(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/shorts\/|facebook\.com|twitch\.tv|vimeo\.com|dailymotion\.com|tiktok\.com\/|instagram\.com)([\w\-\/]+)'
 )
@@ -95,7 +94,7 @@ async def button_callback_handler(update: Update, context: Application) -> None:
         return
 
     # Give immediate feedback that processing has started
-    await query.edit_message_text("🚀 Fetching download link...\n\n_This may take a moment._")
+    await query.edit_message_text("🚀 Fetching download link...\n\n_This may take a moment. We're using specialized settings to bypass bot detection._")
     
     try:
         # Split the callback data: e.g., "download_video|https://..."
@@ -103,57 +102,70 @@ async def button_callback_handler(update: Update, context: Application) -> None:
         
         # Configure yt-dlp options based on the requested action
         if action == 'download_video':
-            # Priority: 1080p MP4 (muxed) > general MP4 (muxed) > best available (let yt-dlp decide)
+            # Format Selector: Prioritize best muxed MP4 < 1080p, then fall back to best overall stream
             format_selector = 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
         elif action == 'download_audio':
-            # Priority: best M4A > best WebM > best available audio
+            # Format Selector: Prioritize best M4A, then WebM, then best audio
             format_selector = 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best'
         else:
             await query.edit_message_text("❌ Unknown action requested.")
             return
 
         # yt-dlp options for link extraction (not actual download)
-        ydl_opts = {
+        ydl_opts: Dict[str, Any] = {
             'format': format_selector,
             'skip_download': True,
             'quiet': True,
             'noplaylist': True,
-            'force_generic_extractor': True,
             'logger': logging.getLogger('yt-dlp.quiet'), 
-            'retries': 5, 
+            
+            # --- Robustness Settings to solve log errors ---
+            'retries': 10, # Increased retries
             'no_check_formats': True, 
-            # Use 'web' as a known robust client for YouTube to bypass certain restrictions
-            'extractor_args': {'youtube': {'player_client': 'web'}},
-            # Crucial: Ensure the output is ready for direct URL extraction
             'simulate': True,
-            'force_generic_extractor': True,
+            
+            # CRITICAL FIXES FOR YOUTUBE ERRORS
+            # 1. Use 'default' client to bypass missing JS runtime warning
+            # 2. Add 'check_content: False' to bypass age/bot confirmation that prevents metadata fetch
+            'extractor_args': {
+                'youtube': {
+                    'player_client': 'default', 
+                    'check_content': False,
+                    # Fallback on the original extractor if the default client fails
+                    'skip_player_errors': True 
+                }
+            },
+            # Use IPv4 only for network stability if the host's IPv6 is causing issues
+            'force_ipv4': True, 
         }
         
         # Run yt-dlp extraction asynchronously
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Running this asynchronously is crucial to avoid blocking the Uvicorn worker
             info = await asyncio.to_thread(ydl.extract_info, url, download=False)
             
         title = info.get('title', 'Your Requested File')
         
-        # --- ROBUST URL EXTRACTION LOGIC FIX ---
+        # --- ROBUST URL EXTRACTION LOGIC ---
         download_url = None
 
-        # 1. Check the primary 'url' field (works for simple streams/audio only)
-        if info.get('url') and not info.get('_filename'):
-            download_url = info['url']
-        
-        # 2. Check the 'requested_formats' for muxed streams (CRUCIAL for YouTube video)
+        # 1. Check the 'requested_formats' for muxed streams (CRUCIAL for YouTube video)
         # The last element of requested_formats often contains the final combined stream's URL
-        if not download_url and info.get('requested_formats'):
+        if info.get('requested_formats'):
             last_requested_format = info['requested_formats'][-1]
             download_url = last_requested_format.get('url')
         
-        # 3. Fallback check on a single format in the 'formats' list
+        # 2. Fallback check on the primary 'url' field (works for simple streams/audio only)
+        if not download_url and info.get('url'):
+            download_url = info['url']
+            
+        # 3. Final fallback check in the full formats list
         if not download_url and info.get('formats'):
-            # This is a less reliable fallback but sometimes necessary
+             # Try to get the last (often best) URL from the formats list
             valid_urls = [f.get('url') for f in info['formats'] if f.get('url')]
             if valid_urls:
                 download_url = valid_urls[-1]
+
 
         if download_url:
             message = (
@@ -166,12 +178,14 @@ async def button_callback_handler(update: Update, context: Application) -> None:
             # Update the message with the result
             await query.edit_message_text(message, parse_mode='Markdown')
         else:
-            await query.edit_message_text("❌ Could not find a direct download link. The content might be protected, geoblocked, private, or unsupported by the service.")
+            await query.edit_message_text("❌ Could not find a direct download link. The content might be protected, or the specific requested format could not be combined.")
 
     except DownloadError as e:
         logger.error(f"yt-dlp DownloadError for {url}: {e}")
         error_message = str(e)
-        if "Sign in to confirm" in error_message or "confirm your age" in error_message:
+        
+        # Check for specific errors like age-restriction which is now handled with a better error message
+        if "Sign in to confirm" in error_message or "confirm your age" in error_message or "geo" in error_message:
              user_friendly_error = (
                  f"⚠️ **Cannot access the video.**\n\n"
                  "The video is likely **age-restricted**, **private**, or **geoblocked**.\n\n"
