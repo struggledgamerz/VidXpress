@@ -3,7 +3,8 @@ import re
 import logging
 import shutil
 import concurrent.futures
-import asyncio # New import for running async setup
+import asyncio
+from contextlib import asynccontextmanager # New import for FastAPI lifespan
 from urllib.parse import urlparse
 
 # --- Telegram/Web Framework Imports ---
@@ -29,15 +30,14 @@ bot_logger = logging.getLogger('TelegramBot')
 download_logger.setLevel(logging.WARNING) 
 
 # --- Global State ---
-# Initialize FastAPI app and Telegram Application globally
-app_fastapi = FastAPI()
-application = None 
+# Initialize Telegram Application globally. It will be set in the lifespan event.
+application: Application = None 
 
 # --- Thread Pool Executor ---
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
 
-# --- Handlers ---
+# --- Handlers (Unchanged) ---
 
 async def start_command(update: Update, context: CallbackContext) -> None:
     """Sends a welcome message when the /start command is issued."""
@@ -59,7 +59,6 @@ async def handle_url(update: Update, context: CallbackContext) -> None:
     url = extract_url(text)
 
     if not url:
-        # Silently return if no URL is found, as we are now using filters.TEXT
         return 
 
     # Send an initial message to the user that the request is being processed
@@ -86,14 +85,12 @@ def execute_callback(future: concurrent.futures.Future, callback_args: dict):
     This function prepares the result and calls the asynchronous send_media_callback.
     """
     try:
-        # Retrieve the result (filepath, temp_dir) from the future
         result = future.result()
-        # Create a new event loop and run the async callback to send the file
         context = callback_args['context']
+        # Use application.loop to schedule the async task safely
         context.application.loop.create_task(send_media_callback(result, callback_args))
     except Exception as e:
         bot_logger.error(f"Error executing callback: {e}")
-        # Attempt to clean up the status message
         context = callback_args['context']
         context.application.loop.create_task(
             context.bot.edit_message_text(
@@ -131,7 +128,7 @@ async def send_media_callback(result: tuple, args: dict):
         bot_logger.info(f"Successfully downloaded file: {path}")
 
         # 3. Determine send method
-        send_method = bot.send_document # Default fallback
+        send_method = bot.send_document 
         caption = f"✅ Download Complete: `{filename}`"
         
         if ext in ['.mp4', '.mov', '.webm', '.mkv']:
@@ -151,7 +148,6 @@ async def send_media_callback(result: tuple, args: dict):
                 chat_id=chat_id,
                 document=f,
                 caption=caption,
-                # Use reply_to_message_id to link the response to the original command
                 reply_to_message_id=args['reply_to_message_id'], 
                 parse_mode='Markdown'
             )
@@ -174,58 +170,76 @@ async def send_media_callback(result: tuple, args: dict):
                 bot_logger.error(f"Error cleaning up temp directory {temp_dir}: {e}")
 
 
-# --- Telegram Bot Setup (Function called by run_setup) ---
+# --- Telegram Bot Initialization ---
 
-async def setup_bot():
-    """
-    Initializes the Telegram Application, handlers, and manually sets the webhook.
-    This function is now asynchronous.
-    """
-    global application
+async def init_bot_async() -> Application:
+    """Initializes the Telegram Application and handlers."""
     
-    # Check configuration for deployment only
-    if BOT_TOKEN == "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY" or WEBHOOK_URL == "https://ff-like-bot-px1w.onrender.com":
-        bot_logger.warning("Configuration variables are using hardcoded fallbacks. Ensure you set environment variables for production.")
-
     # 1. Build the Telegram Application
-    application = (
+    app = (
         Application.builder()
         .token(BOT_TOKEN)
-        .updater(None) # Crucial: disable internal polling updater
+        .updater(None) # Disable internal polling updater
         .build()
     )
     
-    # Initialize Application's internal state (required before calling bot methods)
-    await application.initialize()
+    # Initialize Application's internal state
+    await app.initialize()
 
     # 2. Add Handlers
-    application.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     
-    # Use filters.TEXT and rely on the internal extract_url check
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url)
-    )
-    
-    # 3. Manually Set Webhook URL (avoiding application.run_webhook)
+    return app
+
+async def set_webhook_async():
+    """Manually sets the webhook URL with Telegram."""
+    # We build a temporary application object just to call set_webhook once
+    temp_app = Application.builder().token(BOT_TOKEN).updater(None).build()
+    await temp_app.initialize()
+
     webhook_path = "/webhook"
     webhook_url = WEBHOOK_URL + webhook_path
     
-    # This is the correct method when using an external server like Uvicorn
-    await application.bot.set_webhook(url=webhook_url)
+    await temp_app.bot.set_webhook(url=webhook_url)
+    bot_logger.info(f"Webhook successfully registered to: {webhook_url}")
 
-    bot_logger.info(f"Webhook set to: {webhook_url}")
-    return application
+# --- FastAPI Setup and Lifespan ---
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    FastAPI Lifespan: Initializes the Telegram Application for each Uvicorn worker process.
+    This guarantees the 'application' variable is set before any webhook is handled.
+    """
+    global application
+    bot_logger.info("Initializing Telegram Application for Uvicorn worker...")
+    
+    # Initialize the global application object
+    application = await init_bot_async()
+
+    # Start the application internal update processing
+    await application.start()
+
+    bot_logger.info("Telegram Application ready in worker.")
+    yield # Server starts listening
+
+    # Cleanup: This runs when the server shuts down
+    await application.stop()
+    bot_logger.info("Telegram Application shut down.")
+
+
+# Initialize FastAPI with the lifespan context manager
+app_fastapi = FastAPI(lifespan=lifespan)
 
 # --- Deployment Entry Points ---
 
 # Function required by the deployment command: python3 -c "import main; main.run_setup()"
 def run_setup():
     """
-    Synchronously runs the async setup_bot function to initialize the app and set the webhook.
+    Synchronously runs the async set_webhook_async function to register the webhook URL.
+    This runs in the initial Render build phase before Uvicorn starts.
     """
-    global application
-    
     # Use a new event loop to run the async setup synchronously
     try:
         loop = asyncio.get_event_loop()
@@ -233,10 +247,17 @@ def run_setup():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
     
-    # Run the asynchronous setup function
-    application = loop.run_until_complete(setup_bot())
+    # Register the webhook once
+    loop.run_until_complete(set_webhook_async())
     
-    bot_logger.info("Bot setup complete (Webhooks configured).")
+    bot_logger.info("Bot setup complete (Webhook registered).")
+
+
+# FastAPI route to handle root path health checks
+@app_fastapi.get("/")
+def read_root():
+    """Returns a simple message for health checks."""
+    return {"message": "Telegram Bot Webhook Service is running"}
 
 
 # FastAPI route to receive Telegram updates
@@ -246,7 +267,8 @@ async def telegram_webhook(request: Request):
     global application
     
     if not application:
-        raise HTTPException(status_code=503, detail="Bot not initialized. Check run_setup.")
+        # This guard should rarely be hit now due to the lifespan manager
+        raise HTTPException(status_code=503, detail="Bot not initialized in worker.")
         
     try:
         # Get the update data from the request body
@@ -255,7 +277,7 @@ async def telegram_webhook(request: Request):
         # Convert JSON data to Telegram Update object
         update = Update.de_json(update_json, application.bot)
         
-        # Process the update using the Application's dispatcher
+        # Put the update into the Application's internal queue for processing
         await application.update_queue.put(update)
 
         # Always return 200 OK immediately to Telegram
@@ -277,23 +299,9 @@ if __name__ == "__main__":
         bot_logger.warning("Using hardcoded BOT_TOKEN for local testing.")
 
     try:
-        # Initialize the Application
-        application = (
-            Application.builder()
-            .token(BOT_TOKEN)
-            .build()
-        )
-        
-        # Add Handlers
-        application.add_handler(CommandHandler("start", start_command))
-        
-        # Use filters.TEXT and rely on the internal extract_url check
-        application.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url)
-        )
-        
-        # Start the Polling loop
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        # Initialize and run polling synchronously
+        app = asyncio.run(init_bot_async())
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
         
     except Exception as e:
         bot_logger.error(f"Failed to start bot in polling mode: {e}")
