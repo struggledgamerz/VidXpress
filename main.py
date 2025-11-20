@@ -36,7 +36,7 @@ application: Application = None
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
 
-# --- Handlers (Unchanged) ---
+# --- Handlers ---
 
 async def start_command(update: Update, context: CallbackContext) -> None:
     """Sends a welcome message when the /start command is issued."""
@@ -81,33 +81,40 @@ async def handle_url(update: Update, context: CallbackContext) -> None:
 def execute_callback(future: concurrent.futures.Future, callback_args: dict):
     """
     Callback executed when the download_media thread finishes.
-    This function prepares the result and calls the asynchronous send_media_callback.
-    
-    FIX: Changed .get_loop() to ._get_loop() to access the internal asyncio queue loop
-    when scheduling an async task from the sync thread pool.
+    This function prepares the result and safely schedules the asynchronous 
+    Telegram response onto the main event loop using run_coroutine_threadsafe.
     """
     context = callback_args['context']
+    application = context.application
+    
+    # IMPORTANT FIX: Access the Application's main event loop using .loop.
+    # Use run_coroutine_threadsafe to safely schedule the async callback
+    # from the worker thread pool onto the main event loop.
+    main_loop = application.loop 
+    
     try:
         # Retrieve the result (filepath, temp_dir) from the future
         result = future.result()
         
-        # Schedule the async callback onto the Application's event loop
-        context.application.update_queue._get_loop().create_task(
-            send_media_callback(result, callback_args)
-        )
+        # Define the coroutine to run on the main loop
+        coro = send_media_callback(result, callback_args)
+        
+        # Schedule the coroutine
+        asyncio.run_coroutine_threadsafe(coro, main_loop)
+        
     except Exception as e:
         bot_logger.error(f"Error executing callback: {e}")
         
-        # If an error occurs (e.g., yt-dlp failed), ensure the error message is sent
-        # and the task is scheduled correctly onto the Application's event loop.
-        context.application.update_queue._get_loop().create_task(
-            context.bot.edit_message_text(
+        # If an error occurs, define a coroutine to send the error message
+        async def error_edit_message():
+            await context.bot.edit_message_text(
                 chat_id=callback_args['chat_id'],
                 message_id=callback_args['status_message_id'],
-                # Provide a more specific error for the user if available
                 text=f"An unexpected error occurred during processing: {str(e)}"
             )
-        )
+
+        # Safely schedule the error coroutine
+        asyncio.run_coroutine_threadsafe(error_edit_message(), main_loop)
 
 
 async def send_media_callback(result: tuple, args: dict):
