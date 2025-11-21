@@ -64,7 +64,12 @@ async def handle_url(update: Update, context: CallbackContext) -> None:
         return 
 
     # Send an initial message to the user that the request is being processed
-    status_message = await update.message.reply_text(f"Processing URL: `{url}`\n\nAttempting aggressive download... (This might take a moment)", parse_mode='Markdown')
+    status_message = await update.message.reply_text(
+        f"Processing URL: `{url}`\n\n"
+        "**Attempting aggressive download (Stage 1/2)...**\n"
+        "If this fails, the bot will automatically try a fallback (Stage 2/2).", 
+        parse_mode='Markdown'
+    )
     
     # Run the download process in the background thread pool
     future = executor.submit(download_media, url)
@@ -136,11 +141,12 @@ async def send_media_callback(result: tuple, args: dict):
     try:
         # 1. Check if the download failed (filepath is None)
         if filepath is None or not os.path.exists(filepath):
-            # Case: Aggressive download attempt failed
+            # Case: Two-stage download attempt failed
             final_error_message = (
-                "❌ Download Failed: The aggressive download attempt was unsuccessful.\n\n"
-                "This almost always means the content is **strictly private, age-restricted, "
-                "or requires user sign-in/cookies** that cannot be provided by the bot."
+                "❌ **Download Failed (Two Attempts Unsuccessful)**\n\n"
+                "The media could not be fetched by the bot. This is because the content is "
+                "most likely **strictly private, age-restricted, or requires user sign-in/cookies** "
+                "to access, which the bot cannot provide."
             )
             await bot.edit_message_text(
                 chat_id=chat_id,
