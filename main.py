@@ -46,7 +46,8 @@ async def start_command(update: Update, context: CallbackContext) -> None:
     user = update.effective_user
     await update.message.reply_html(
         f"Hi {user.first_name}!\n\n"
-        "Send me a URL from YouTube, Instagram, Threads, Moj, or Chingari, and I will try to download the media for you.\n\n"
+        # UPDATED APP LIST: Including Facebook (FB)
+        "Send me a URL from **YouTube, Facebook (FB), Instagram, Threads, Moj, or Chingari**, and I will try to download the media for you.\n\n"
         "Please be patient, as large video files may take a moment to process.",
     )
 
@@ -164,15 +165,18 @@ async def send_media_callback(result: tuple, args: dict):
         
         bot_logger.info(f"Successfully downloaded file: {filepath}")
 
-        # 4. Determine send method
+        # 4. Determine send method and the required argument name
         send_method = bot.send_document 
+        media_arg_name = 'document'
         caption = f"✅ Download Complete: `{filename}`"
         
         if ext in ['.mp4', '.mov', '.webm', '.mkv']:
             send_method = bot.send_video
+            media_arg_name = 'video' # <--- FIX: Use 'video' for video methods
             caption = "✅ Video Downloaded"
         elif ext in ['.jpg', '.jpeg', '.png', '.webp']:
             send_method = bot.send_photo
+            media_arg_name = 'photo' # <--- FIX: Use 'photo' for photo methods
             caption = "✅ Image Downloaded"
 
         # 5. Send the file
@@ -180,10 +184,13 @@ async def send_media_callback(result: tuple, args: dict):
             # First, delete the "Downloading..." message
             await bot.delete_message(chat_id=chat_id, message_id=status_message_id)
 
-            # Then, send the media file
+            # Create the dynamic keyword argument dictionary: {'document': f} or {'video': f}
+            media_args = {media_arg_name: f}
+
+            # Then, send the media file using keyword unpacking
             await send_method(
                 chat_id=chat_id,
-                document=f,
+                **media_args, # <--- FIX: Unpack the dynamic argument here
                 caption=caption,
                 reply_to_message_id=args['reply_to_message_id'], 
                 parse_mode='Markdown'
