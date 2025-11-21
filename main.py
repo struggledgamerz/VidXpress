@@ -31,6 +31,8 @@ download_logger.setLevel(logging.WARNING)
 # --- Global State ---
 # Initialize Telegram Application globally. It will be set in the lifespan event.
 application: Application = None 
+# NEW: Global variable to store the main asyncio event loop reference
+MAIN_LOOP: asyncio.AbstractEventLoop = None 
 
 # --- Thread Pool Executor ---
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
@@ -85,13 +87,16 @@ def execute_callback(future: concurrent.futures.Future, callback_args: dict):
     Telegram response onto the main event loop using run_coroutine_threadsafe.
     """
     context = callback_args['context']
-    application = context.application
     
-    # IMPORTANT FIX: Access the Application's main event loop using .loop.
-    # Use run_coroutine_threadsafe to safely schedule the async callback
-    # from the worker thread pool onto the main event loop.
-    main_loop = application.loop 
+    global MAIN_LOOP # Use the global loop reference
+
+    # CRITICAL FIX: Use the globally stored MAIN_LOOP which was set during Uvicorn startup.
+    main_loop = MAIN_LOOP 
     
+    if not main_loop:
+        bot_logger.error("MAIN_LOOP is not set. Cannot schedule async task.")
+        return
+
     try:
         # Retrieve the result (filepath, temp_dir) from the future
         result = future.result()
@@ -234,9 +239,8 @@ async def set_webhook_async():
 async def lifespan(app: FastAPI):
     """
     FastAPI Lifespan: Initializes the Telegram Application for each Uvicorn worker process.
-    This guarantees the 'application' variable is set before any webhook is handled.
     """
-    global application
+    global application, MAIN_LOOP
     bot_logger.info("Initializing Telegram Application for Uvicorn worker...")
     
     # Initialize the global application object
@@ -244,12 +248,17 @@ async def lifespan(app: FastAPI):
 
     # Start the application internal update processing
     await application.start()
+    
+    # CRITICAL FIX: Store the main event loop reference here, 
+    # where we are guaranteed to be in the running loop context.
+    MAIN_LOOP = asyncio.get_running_loop()
 
     bot_logger.info("Telegram Application ready in worker.")
     yield # Server starts listening
 
     # Cleanup: This runs when the server shuts down
     await application.stop()
+    MAIN_LOOP = None # Clear loop reference on shutdown
     bot_logger.info("Telegram Application shut down.")
 
 
@@ -329,4 +338,3 @@ if __name__ == "__main__":
         
     except Exception as e:
         bot_logger.error(f"Failed to start bot in polling mode: {e}")
-        
