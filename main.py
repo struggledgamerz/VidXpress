@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request, Response, HTTPException
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
 
-# Import the main download function from the local file
+# Import the main download function from the local file and the logger
 from download_manager import download_media, logger as download_logger
 
 # --- Configuration ---
@@ -26,12 +26,13 @@ logging.basicConfig(
     level=logging.INFO,
 )
 bot_logger = logging.getLogger('TelegramBot')
-download_logger.setLevel(logging.WARNING) 
+# CRITICAL: Change download logger level to INFO to capture detailed yt-dlp errors
+download_logger.setLevel(logging.INFO) 
 
 # --- Global State ---
 # Initialize Telegram Application globally. It will be set in the lifespan event.
 application: Application = None 
-# NEW: Global variable to store the main asyncio event loop reference
+# Global variable to store the main asyncio event loop reference
 MAIN_LOOP: asyncio.AbstractEventLoop = None 
 
 # --- Thread Pool Executor ---
@@ -63,7 +64,7 @@ async def handle_url(update: Update, context: CallbackContext) -> None:
         return 
 
     # Send an initial message to the user that the request is being processed
-    status_message = await update.message.reply_text(f"Processing URL: `{url}`\n\nStarting download... (This might take a moment)", parse_mode='Markdown')
+    status_message = await update.message.reply_text(f"Processing URL: `{url}`\n\nAttempting aggressive download... (This might take a moment)", parse_mode='Markdown')
     
     # Run the download process in the background thread pool
     future = executor.submit(download_media, url)
@@ -90,7 +91,6 @@ def execute_callback(future: concurrent.futures.Future, callback_args: dict):
     
     global MAIN_LOOP # Use the global loop reference
 
-    # CRITICAL FIX: Use the globally stored MAIN_LOOP which was set during Uvicorn startup.
     main_loop = MAIN_LOOP 
     
     if not main_loop:
@@ -98,7 +98,7 @@ def execute_callback(future: concurrent.futures.Future, callback_args: dict):
         return
 
     try:
-        # Retrieve the result (filepath, temp_dir) from the future
+        # Retrieve the result (filepath/error_string, temp_dir) from the future
         result = future.result()
         
         # Define the coroutine to run on the main loop
@@ -115,7 +115,7 @@ def execute_callback(future: concurrent.futures.Future, callback_args: dict):
             await context.bot.edit_message_text(
                 chat_id=callback_args['chat_id'],
                 message_id=callback_args['status_message_id'],
-                text=f"An unexpected error occurred during processing: {str(e)}"
+                text=f"An unexpected system error occurred: {str(e)}"
             )
 
         # Safely schedule the error coroutine
@@ -125,30 +125,40 @@ def execute_callback(future: concurrent.futures.Future, callback_args: dict):
 async def send_media_callback(result: tuple, args: dict):
     """
     Asynchronously sends the downloaded file to the user and cleans up.
+    Checks if the aggressive download attempt succeeded.
     """
-    path, temp_dir = result
+    filepath, temp_dir = result
     chat_id = args['chat_id']
     status_message_id = args['status_message_id']
     context = args['context']
     bot = context.bot
 
     try:
-        # 1. Check for success
-        if not path:
+        # 1. Check if the download failed (filepath is None)
+        if filepath is None or not os.path.exists(filepath):
+            # Case: Aggressive download attempt failed
+            final_error_message = (
+                "❌ Download Failed: The aggressive download attempt was unsuccessful.\n\n"
+                "This almost always means the content is **strictly private, age-restricted, "
+                "or requires user sign-in/cookies** that cannot be provided by the bot."
+            )
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_message_id,
-                text="❌ Could not download media from the provided URL. The link may be invalid or restricted. (Check for sign-in requirements or region locks.)"
+                text=final_error_message,
+                parse_mode='Markdown'
             )
             return
 
-        # 2. Prepare file
-        filename = os.path.basename(path)
-        ext = os.path.splitext(path)[1].lower()
+        # 2. If we reach here, filepath is a valid file path
         
-        bot_logger.info(f"Successfully downloaded file: {path}")
+        # 3. Prepare file details
+        filename = os.path.basename(filepath)
+        ext = os.path.splitext(filepath)[1].lower()
+        
+        bot_logger.info(f"Successfully downloaded file: {filepath}")
 
-        # 3. Determine send method
+        # 4. Determine send method
         send_method = bot.send_document 
         caption = f"✅ Download Complete: `{filename}`"
         
@@ -159,8 +169,8 @@ async def send_media_callback(result: tuple, args: dict):
             send_method = bot.send_photo
             caption = "✅ Image Downloaded"
 
-        # 4. Send the file
-        with open(path, 'rb') as f:
+        # 5. Send the file
+        with open(filepath, 'rb') as f:
             # First, delete the "Downloading..." message
             await bot.delete_message(chat_id=chat_id, message_id=status_message_id)
 
@@ -175,14 +185,14 @@ async def send_media_callback(result: tuple, args: dict):
             bot_logger.info(f"Sent media to chat {chat_id}")
 
     except Exception as e:
-        bot_logger.error(f"Failed to send file or encountered error: {e}")
+        bot_logger.error(f"Failed to send file or encountered error in send_media_callback: {e}")
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=status_message_id,
-            text=f"An error occurred while sending the file: {e}"
+            text=f"An unexpected error occurred while processing the file: {type(e).__name__} - {str(e)}"
         )
     finally:
-        # 5. Cleanup temporary directory
+        # 6. Cleanup temporary directory
         if temp_dir and os.path.exists(temp_dir):
             try:
                 shutil.rmtree(temp_dir)
@@ -249,8 +259,7 @@ async def lifespan(app: FastAPI):
     # Start the application internal update processing
     await application.start()
     
-    # CRITICAL FIX: Store the main event loop reference here, 
-    # where we are guaranteed to be in the running loop context.
+    # CRITICAL: Store the main event loop reference here
     MAIN_LOOP = asyncio.get_running_loop()
 
     bot_logger.info("Telegram Application ready in worker.")
