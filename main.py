@@ -1,12 +1,19 @@
 import os
 import tempfile
 import logging
-import shutil # Added for explicit cleanup
+import shutil
 from typing import Dict, Any, Union
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse # Added for serving HTML
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder, 
+    MessageHandler, 
+    filters, 
+    ContextTypes, 
+    CommandHandler
+)
 from telegram.constants import ParseMode
 import yt_dlp
 
@@ -28,6 +35,79 @@ logger = logging.getLogger(__name__)
 
 # Maximum file size for Telegram bot API upload in bytes (50 MB limit applied to avoid timeouts)
 MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024 
+
+# --- Static Privacy Policy Content (for the web endpoint) ---
+PRIVACY_POLICY_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Video Downloader Bot - Privacy Policy</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f4f4f9;
+            color: #333;
+        }
+        .container {
+            max-width: 700px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #007bff;
+            border-bottom: 2px solid #007bff;
+            padding-bottom: 10px;
+            margin-top: 0;
+        }
+        h2 {
+            color: #555;
+            margin-top: 25px;
+        }
+        p, ul {
+            line-height: 1.6;
+        }
+        ul {
+            list-style-type: disc;
+            padding-left: 20px;
+        }
+        code {
+            background-color: #eee;
+            padding: 2px 4px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Video Downloader Bot - Privacy Policy</h1>
+        <p>This bot is designed solely to download and relay publicly accessible video content from external platforms (e.g., YouTube, Facebook).</p>
+
+        <h2>1. Data Collection and Processing</h2>
+        <ul>
+            <li><strong>Input Data:</strong> The bot only processes the URL link you send in your message to identify and locate the video source.</li>
+            <li><strong>Personal Data:</strong> We do not collect, store, or share any personal identifying information (like your Telegram User ID or chat history) beyond what is required to fulfill the request.</li>
+        </ul>
+
+        <h2>2. Content Storage and Deletion</h2>
+        <ul>
+            <li><strong>Temporary Files:</strong> Requested videos are downloaded to a temporary location on the host server.</li>
+            <li><strong>No Persistence:</strong> These files are immediately and permanently deleted using the <code>shutil.rmtree()</code> function after they are successfully uploaded to Telegram or if the download/upload process fails. No logs or files related to your requests are retained after the transaction is complete.</li>
+        </ul>
+
+        <h2>3. Third Parties</h2>
+        <p>Video processing relies on the <code>yt-dlp</code> tool to handle video extraction and format detection, and the standard Telegram Bot API for message handling and file uploads.</p>
+        
+        <p style="margin-top: 30px; font-size: 0.9em; color: #777;">Last Updated: November 2025</p>
+    </div>
+</body>
+</html>
+"""
 
 class DownloadManager:
     """Manages yt-dlp download operations with custom settings."""
@@ -55,10 +135,8 @@ class DownloadManager:
             'outtmpl': output_template,
             # Filter by max file size to prevent timeouts on large uploads.
             'max_filesize': MAX_FILE_SIZE_BYTES, 
-            # --- TWEAK FOR YOUTUBE/SHORTS ---
             # Prioritize best MP4 format (which Telegram wants), then best overall. 
             'format': 'best[ext=mp4]/best', 
-            # ---------------------------------
             'noplaylist': True,
             'quiet': True,
             'verbose': False,
@@ -134,12 +212,16 @@ class TelegramBot:
     def __init__(self, token: str):
         self.download_manager = DownloadManager()
         self.app = ApplicationBuilder().token(token).build()
+        
+        # Handlers: Only start and message handler (removed /policy)
+        self.app.add_handler(CommandHandler("start", self.start))
         self.app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message))
         self.logger = logging.getLogger('TelegramBot')
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Sends a welcome message on /start."""
-        await update.message.reply_text('Hello! Send me a link to a video from Facebook, YouTube, or other supported sites, and I will try to download and send it to you. \n\n⚠️ **Note:** Videos over 50MB may fail due to upload size/time limits.', 
+        policy_url = f"{WEBHOOK_URL}/privacy"
+        await update.message.reply_text(f'Hello! Send me a link to a video from Facebook, YouTube, or other supported sites, and I will try to download and send it to you. \n\n⚠️ **Note:** Videos over 50MB may fail due to upload size/time limits. The official [Privacy Policy]({policy_url}) is available here.', 
                                         parse_mode=ParseMode.MARKDOWN)
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -178,12 +260,12 @@ class TelegramBot:
             # 4a. Delete the initial processing message
             await processing_message.delete()
             
-            # 4b. Send the file using a callback to clean up the temp directory
+            # 4b. Send the file 
             await update.message.reply_video(
                 video=open(file_path, 'rb'),
                 caption=f"✅ Downloaded successfully!",
                 supports_streaming=True,
-                read_timeout=60, # Increase timeout for large uploads
+                read_timeout=60, 
                 write_timeout=60
             )
 
@@ -210,6 +292,13 @@ class TelegramBot:
 app = FastAPI()
 bot = TelegramBot(token=BOT_TOKEN)
 application = bot.app 
+
+# NEW PUBLIC WEB ENDPOINT FOR PRIVACY POLICY
+@app.get("/privacy", response_class=HTMLResponse)
+async def get_privacy_policy():
+    """Serves the privacy policy as a public HTML page."""
+    return PRIVACY_POLICY_HTML
+
 
 @app.on_event("startup")
 async def startup_event():
