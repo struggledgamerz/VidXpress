@@ -5,7 +5,7 @@ import shutil
 from typing import Dict, Any, Union
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse # Added for serving HTML
+from fastapi.responses import HTMLResponse
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, 
@@ -41,7 +41,7 @@ PRIVACY_POLICY_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>VidXpress - Privacy Policy</title>
+    <title>VidXpress⚡ - Privacy Policy</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         body {
@@ -213,7 +213,7 @@ class TelegramBot:
         self.download_manager = DownloadManager()
         self.app = ApplicationBuilder().token(token).build()
         
-        # Handlers: Only start and message handler (removed /policy)
+        # Handlers: Only start and message handler 
         self.app.add_handler(CommandHandler("start", self.start))
         self.app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message))
         self.logger = logging.getLogger('TelegramBot')
@@ -302,15 +302,28 @@ async def get_privacy_policy():
 
 @app.on_event("startup")
 async def startup_event():
-    """Set the webhook on startup."""
+    """Initialize PTB application and set the webhook on startup."""
     if WEBHOOK_URL and BOT_TOKEN != 'YOUR_BOT_TOKEN':
-        # The URL must point to the /webhook endpoint
+        # FIX: Explicitly initialize and start the PTB application for webhook readiness
+        await application.initialize()
+        
+        # Set the webhook
         webhook_url = f"{WEBHOOK_URL}/webhook"
         logger.info(f"Setting webhook to {webhook_url}")
-        # Use the base PTB Application object to set the webhook
         await application.bot.set_webhook(url=webhook_url)
+
+        # Start the application instance (required for process_update to work)
+        await application.start()
     else:
         logger.error("BOT_TOKEN or WEBHOOK_URL not configured. Cannot set webhook.")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop the PTB application on shutdown."""
+    if WEBHOOK_URL and BOT_TOKEN != 'YOUR_BOT_TOKEN':
+        # Cleanly stop the application on service shutdown
+        await application.stop()
 
 
 @app.post("/webhook")
