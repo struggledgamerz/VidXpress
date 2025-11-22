@@ -147,8 +147,8 @@ class DownloadManager:
             'noprogress': True,
             'logger': self.logger,
             'allow_unplayable_formats': True,
-            # Removed 'extractor_args': {'youtube': {'player_client': 'default'}},
-            # as the installed js2py package handles the JS runtime now.
+            # Removed conflicting 'extractor_args' now that js2py is installed. 
+            # We rely on js2py to handle JavaScript decryption.
         }
 
         self.logger.info(f"Created temporary directory: {temp_dir}")
@@ -246,16 +246,16 @@ class TelegramBot:
                 error = download_result['error']
                 # Provide a more specific error message for common YouTube issues
                 youtube_hint = ""
-                # Added hint for the new JS runtime failure
-                if "Sign in to confirm" in error:
-                    youtube_hint = "\n\n**Possible Cause:** The video requires sign-in (age restriction/private). The bot cannot authenticate."
+                if "Sign in to confirm" in error or "cookies" in error:
+                    # Clearer message that the bot cannot access authenticated videos
+                    youtube_hint = "\n\n**🛑 UNABLE TO ACCESS (SIGN-IN REQUIRED):** This video is age-restricted, private, or requires authentication (cookies). The bot cannot log in to YouTube, making this video permanently inaccessible."
                 elif "JavaScript runtime" in error:
                     youtube_hint = "\n\n**Possible Cause:** The video uses a highly complex format requiring a full JavaScript runtime to decrypt. While we've installed a fallback (js2py), the video's protection might be too advanced for it."
                 
                 await context.bot.edit_message_text(
                     chat_id=update.effective_chat.id, 
                     message_id=processing_message.message_id,
-                    text=f"❌ Download Failed!\n\nReason: The video is likely private, age-restricted, or too large (>{MAX_FILE_SIZE_BYTES / 1024 / 1024:.0f}MB).{youtube_hint}\n\nDetails: `{error}`", 
+                    text=f"❌ Download Failed!\n\nReason: The video is likely too large (>{MAX_FILE_SIZE_BYTES / 1024 / 1024:.0f}MB) or protected.{youtube_hint}\n\nDetails: `{error}`", 
                     parse_mode=ParseMode.MARKDOWN
                 )
                 return
