@@ -41,7 +41,7 @@ PRIVACY_POLICY_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Video Downloader Bot - Privacy Policy</title>
+    <title>VidXpress - Privacy Policy</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         body {
