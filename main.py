@@ -1,362 +1,247 @@
 import os
-import re
+import tempfile
 import logging
-import shutil
-import concurrent.futures
-import asyncio
-from contextlib import asynccontextmanager
+import shutil # Added for explicit cleanup
+from typing import Dict, Any, Union
 
-# --- Telegram/Web Framework Imports ---
-from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi import FastAPI, Request, HTTPException
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
-
-# Import the main download function from the local file and the logger
-from download_manager import download_media, logger as download_logger
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram.constants import ParseMode
+import yt_dlp
 
 # --- Configuration ---
-# NOTE: The token is securely retrieved from the environment variable TELEGRAM_BOT_TOKEN.
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY") 
-WEBHOOK_URL = os.environ.get("WEBHOOK_BASE_URL", "https://ff-like-bot-px1w.onrender.com")
-PORT = int(os.environ.get("PORT", "8080")) # Default port for Uvicorn
+# Set the port Uvicorn/FastAPI will listen on (Render default is 10000)
+PORT = int(os.environ.get('PORT', 10000)) 
+# Your Bot Token goes here
+BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY') # Replace with your actual token in the deployment environment
 
-# Set up main logging
+# Public URL of the deployed service (e.g., https://your-service-name.onrender.com)
+WEBHOOK_URL = os.environ.get('WEBHOOK_BASE_URL', 'https://ff-like-bot-px1w.onrender.com') 
+
+# Set up logging
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
-bot_logger = logging.getLogger('TelegramBot')
-# CRITICAL: Change download logger level to INFO to capture detailed yt-dlp errors
-download_logger.setLevel(logging.INFO) 
+logger = logging.getLogger(__name__)
 
-# --- Global State ---
-# Initialize Telegram Application globally. It will be set in the lifespan event.
-application: Application = None 
-# Global variable to store the main asyncio event loop reference
-MAIN_LOOP: asyncio.AbstractEventLoop = None 
+# Maximum file size for Telegram bot API upload in bytes (50 MB limit applied to avoid timeouts)
+MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024 
 
-# --- Thread Pool Executor ---
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
+class DownloadManager:
+    """Manages yt-dlp download operations with custom settings."""
+    def __init__(self):
+        self.logger = logging.getLogger('DownloadManager')
 
-
-# --- Handlers ---
-
-async def start_command(update: Update, context: CallbackContext) -> None:
-    """Sends a welcome message when the /start command is issued."""
-    user = update.effective_user
-    await update.message.reply_html(
-        f"Hi {user.first_name}!\n\n"
-        # UPDATED APP LIST: Including Facebook (FB)
-        "Send me a URL from **YouTube, Facebook (FB), Instagram, Threads, Moj, or Chingari**, and I will try to download the media for you.\n\n"
-        "Please be patient, as large video files may take a moment to process.",
-    )
-
-def extract_url(text):
-    """Simple regex to extract the first URL from a string."""
-    urls = re.findall(r'https?://[^\s]+', text)
-    return urls[0] if urls else None
-
-async def handle_url(update: Update, context: CallbackContext) -> None:
-    """Processes incoming messages that might contain a URL."""
-    text = update.message.text
-    url = extract_url(text)
-
-    if not url:
-        return 
-
-    # Send an initial message to the user that the request is being processed
-    status_message = await update.message.reply_text(
-        f"Processing URL: `{url}`\n\n"
-        "**Attempting aggressive download (Stage 1/2)...**\n"
-        "If this fails, the bot will automatically try a fallback (Stage 2/2).", 
-        parse_mode='Markdown'
-    )
-    
-    # Run the download process in the background thread pool
-    future = executor.submit(download_media, url)
-    
-    # Store necessary context information to use in the callback
-    callback_args = {
-        'chat_id': update.effective_chat.id,
-        'reply_to_message_id': update.message.message_id,
-        'status_message_id': status_message.message_id,
-        'context': context,
-    }
-
-    # Attach the callback function to handle the result when the download is finished
-    future.add_done_callback(lambda f: execute_callback(f, callback_args))
-
-
-def execute_callback(future: concurrent.futures.Future, callback_args: dict):
-    """
-    Callback executed when the download_media thread finishes.
-    This function prepares the result and safely schedules the asynchronous 
-    Telegram response onto the main event loop using run_coroutine_threadsafe.
-    """
-    context = callback_args['context']
-    
-    global MAIN_LOOP # Use the global loop reference
-
-    main_loop = MAIN_LOOP 
-    
-    if not main_loop:
-        bot_logger.error("MAIN_LOOP is not set. Cannot schedule async task.")
-        return
-
-    try:
-        # Retrieve the result (filepath/error_string, temp_dir) from the future
-        result = future.result()
+    def download(self, url: str) -> Dict[str, Union[str, bool]]:
+        """
+        Attempts to download the video from the given URL.
+        Returns a dict containing the status and resulting file path or error message.
+        """
+        temp_dir = tempfile.mkdtemp()
+        download_info = {
+            'success': False,
+            'file_path': None,
+            'error': None,
+            'temp_dir': temp_dir
+        }
         
-        # Define the coroutine to run on the main loop
-        coro = send_media_callback(result, callback_args)
-        
-        # Schedule the coroutine
-        asyncio.run_coroutine_threadsafe(coro, main_loop)
-        
-    except Exception as e:
-        bot_logger.error(f"Error executing callback: {e}")
-        
-        # If an error occurs, define a coroutine to send the error message
-        async def error_edit_message():
-            await context.bot.edit_message_text(
-                chat_id=callback_args['chat_id'],
-                message_id=callback_args['status_message_id'],
-                text=f"An unexpected system error occurred: {str(e)}"
-            )
+        # Use a short template based on the video ID within the temp directory.
+        output_template = os.path.join(temp_dir, '%(id)s.%(ext)s')
 
-        # Safely schedule the error coroutine
-        asyncio.run_coroutine_threadsafe(error_edit_message(), main_loop)
+        # yt-dlp options (Attempt 1: Simple MP4 priority)
+        ydl_opts = {
+            'outtmpl': output_template,
+            # Filter by max file size to prevent timeouts on large uploads.
+            'max_filesize': MAX_FILE_SIZE_BYTES, 
+            # --- TWEAK FOR YOUTUBE/SHORTS ---
+            # Prioritize best MP4 format (which Telegram wants), then best overall. 
+            'format': 'best[ext=mp4]/best', 
+            # ---------------------------------
+            'noplaylist': True,
+            'quiet': True,
+            'verbose': False,
+            'noprogress': True,
+            'logger': self.logger,
+            'allow_unplayable_formats': True,
+            # Workaround for missing JavaScript runtime (needed for YouTube)
+            'extractor_args': {'youtube': {'player_client': 'default'}},
+        }
+
+        self.logger.info(f"Created temporary directory: {temp_dir}")
+        self.logger.info("Attempt 1: Trying simple MP4 format priority.")
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info_dict = ydl.extract_info(url, download=True)
+                # Find the actual downloaded file path
+                downloaded_files = []
+                if 'requested_downloads' in info_dict:
+                    downloaded_files = [f['filepath'] for f in info_dict['requested_downloads'] if os.path.exists(f['filepath'])]
+                
+                # Secondary check for files written directly to temp_dir
+                if not downloaded_files and os.listdir(temp_dir):
+                    for filename in os.listdir(temp_dir):
+                        if filename.startswith(info_dict.get('id', '')):
+                            downloaded_files.append(os.path.join(temp_dir, filename))
+                            
+                if downloaded_files:
+                    download_info['file_path'] = downloaded_files[0]
+                    download_info['success'] = True
+                    self.logger.info(f"Attempt 1 successful. Downloaded file: {download_info['file_path']}")
+                    return download_info
 
 
-async def send_media_callback(result: tuple, args: dict):
-    """
-    Asynchronously sends the downloaded file to the user and cleans up.
-    Checks if the aggressive download attempt succeeded.
-    """
-    filepath, temp_dir = result
-    chat_id = args['chat_id']
-    status_message_id = args['status_message_id']
-    context = args['context']
-    bot = context.bot
-
-    try:
-        # 1. Check if the download failed (filepath is None)
-        if filepath is None or not os.path.exists(filepath):
-            # Case: Two-stage download attempt failed
-            final_error_message = (
-                "❌ **Download Failed (Two Attempts Unsuccessful)**\n\n"
-                "The media could not be fetched by the bot. This is because the content is "
-                "most likely **strictly private, age-restricted, or requires user sign-in/cookies** "
-                "to access, which the bot cannot provide."
-            )
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=status_message_id,
-                text=final_error_message,
-                parse_mode='Markdown'
-            )
-            return
-
-        # 2. If we reach here, filepath is a valid file path
-        
-        # 3. Prepare file details
-        filename = os.path.basename(filepath)
-        ext = os.path.splitext(filepath)[1].lower()
-        
-        bot_logger.info(f"Successfully downloaded file: {filepath}")
-
-        # 4. Determine send method and the required argument name
-        send_method = bot.send_document 
-        media_arg_name = 'document'
-        caption = f"✅ Download Complete: `{filename}`"
-        
-        if ext in ['.mp4', '.mov', '.webm', '.mkv']:
-            send_method = bot.send_video
-            media_arg_name = 'video' # <--- FIX: Use 'video' for video methods
-            caption = "✅ Video Downloaded"
-        elif ext in ['.jpg', '.jpeg', '.png', '.webp']:
-            send_method = bot.send_photo
-            media_arg_name = 'photo' # <--- FIX: Use 'photo' for photo methods
-            caption = "✅ Image Downloaded"
-
-        # 5. Send the file
-        with open(filepath, 'rb') as f:
-            # First, delete the "Downloading..." message
-            await bot.delete_message(chat_id=chat_id, message_id=status_message_id)
-
-            # Create the dynamic keyword argument dictionary: {'document': f} or {'video': f}
-            media_args = {media_arg_name: f}
-
-            # Then, send the media file using keyword unpacking
-            await send_method(
-                chat_id=chat_id,
-                **media_args, # <--- FIX: Unpack the dynamic argument here
-                caption=caption,
-                reply_to_message_id=args['reply_to_message_id'], 
-                parse_mode='Markdown'
-            )
-            bot_logger.info(f"Sent media to chat {chat_id}")
-
-    except Exception as e:
-        bot_logger.error(f"Failed to send file or encountered error in send_media_callback: {e}")
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=status_message_id,
-            text=f"An unexpected error occurred while processing the file: {type(e).__name__} - {str(e)}"
-        )
-    finally:
-        # 6. Cleanup temporary directory
-        if temp_dir and os.path.exists(temp_dir):
+        except Exception as e:
+            error_message = str(e)
+            self.logger.warning(f"Attempt 1 failed. Reason: {error_message}")
+            download_info['error'] = error_message
+            
+            # --- Attempt 2: Fallback (Absolute best quality/format) ---
+            self.logger.info("Attempt 2: Falling back to absolute best quality/format.")
+            ydl_opts.pop('format', None) # Remove explicit format filter
+            
             try:
-                shutil.rmtree(temp_dir)
-                bot_logger.info(f"Cleaned up temporary directory: {temp_dir}")
-            except OSError as e:
-                bot_logger.error(f"Error cleaning up temp directory {temp_dir}: {e}")
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info_dict = ydl.extract_info(url, download=True)
+                    downloaded_files = []
+                    if 'requested_downloads' in info_dict:
+                        downloaded_files = [f['filepath'] for f in info_dict['requested_downloads'] if os.path.exists(f['filepath'])]
+                    
+                    if not downloaded_files and os.listdir(temp_dir):
+                        for filename in os.listdir(temp_dir):
+                            if filename.startswith(info_dict.get('id', '')):
+                                downloaded_files.append(os.path.join(temp_dir, filename))
+                                
+                    if downloaded_files:
+                        download_info['file_path'] = downloaded_files[0]
+                        download_info['success'] = True
+                        self.logger.info(f"Attempt 2 successful. Downloaded file: {download_info['file_path']}")
+                        return download_info
+                                
+            except Exception as e:
+                final_error = str(e)
+                self.logger.error(f"Attempt 2 failed. Final failure reason: {final_error}")
+                download_info['error'] = final_error
+                return download_info
+
+        return download_info
 
 
-# --- Telegram Bot Initialization ---
+class TelegramBot:
+    """The main Telegram Bot logic and handlers."""
+    def __init__(self, token: str):
+        self.download_manager = DownloadManager()
+        self.app = ApplicationBuilder().token(token).build()
+        self.app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message))
+        self.logger = logging.getLogger('TelegramBot')
 
-async def init_bot_async() -> Application:
-    """Initializes the Telegram Application and handlers."""
-    
-    # Check configuration for deployment only
-    if BOT_TOKEN == "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY" or WEBHOOK_URL == "https://ff-like-bot-px1w.onrender.com":
-        bot_logger.warning("Configuration variables are using hardcoded fallbacks. Ensure you set environment variables for production.")
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Sends a welcome message on /start."""
+        await update.message.reply_text('Hello! Send me a link to a video from Facebook, YouTube, or other supported sites, and I will try to download and send it to you. \n\n⚠️ **Note:** Videos over 50MB may fail due to upload size/time limits.', 
+                                        parse_mode=ParseMode.MARKDOWN)
 
-    # 1. Build the Telegram Application
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .updater(None) # Disable internal polling updater
-        .build()
-    )
-    
-    # Initialize Application's internal state
-    await app.initialize()
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handles text messages containing a URL."""
+        url = update.message.text
+        
+        # 1. Send initial processing message
+        processing_message = await update.message.reply_text("⏳ Processing link and checking size...", parse_mode=ParseMode.HTML)
 
-    # 2. Add Handlers
-    app.add_handler(CommandHandler("start", start_command))
-    
-    # Use filters.TEXT and rely on the internal extract_url check
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url)
-    )
-    
-    return app
+        # 2. Start download
+        download_result = {'temp_dir': None}
+        try:
+            download_result = self.download_manager.download(url)
+            temp_dir = download_result['temp_dir']
+            
+            # 3. Handle download failure
+            if not download_result['success']:
+                error = download_result['error']
+                # Provide a more specific error message for common YouTube issues
+                youtube_hint = ""
+                if "Sign in to confirm" in error or "JavaScript runtime" in error:
+                    youtube_hint = "\n\n**Possible Cause:** The video requires sign-in (age restriction/private) or the server lacks a JavaScript engine needed to process complex YouTube formats."
+                
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id, 
+                    message_id=processing_message.message_id,
+                    text=f"❌ Download Failed!\n\nReason: The video is likely private, age-restricted, or too large (>{MAX_FILE_SIZE_BYTES / 1024 / 1024:.0f}MB).{youtube_hint}\n\nDetails: `{error}`", 
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
 
-async def set_webhook_async():
-    """Manually sets the webhook URL with Telegram."""
-    # We build a temporary application object just to call set_webhook once
-    temp_app = Application.builder().token(BOT_TOKEN).updater(None).build()
-    await temp_app.initialize()
+            # 4. Handle successful download
+            file_path = download_result['file_path']
+            self.logger.info(f"Successfully downloaded file: {file_path}")
+            
+            # 4a. Delete the initial processing message
+            await processing_message.delete()
+            
+            # 4b. Send the file using a callback to clean up the temp directory
+            await update.message.reply_video(
+                video=open(file_path, 'rb'),
+                caption=f"✅ Downloaded successfully!",
+                supports_streaming=True,
+                read_timeout=60, # Increase timeout for large uploads
+                write_timeout=60
+            )
 
-    webhook_path = "/webhook"
-    webhook_url = WEBHOOK_URL + webhook_path
-    
-    await temp_app.bot.set_webhook(url=webhook_url)
-    bot_logger.info(f"Webhook successfully registered to: {webhook_url}")
+        except Exception as e:
+            self.logger.error(f"Failed to send file or encountered error in send_media_callback: {e}")
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id, 
+                message_id=processing_message.message_id,
+                text=f"❌ An unexpected error occurred during upload: `{e}`. This usually means the file was too large and the connection timed out.",
+                parse_mode=ParseMode.MARKDOWN
+            )
 
-# --- FastAPI Setup and Lifespan ---
+        finally:
+            # 5. Cleanup temporary directory
+            if 'temp_dir' in download_result and download_result['temp_dir'] and os.path.exists(download_result['temp_dir']):
+                try:
+                    shutil.rmtree(download_result['temp_dir'])
+                    self.logger.info(f"Cleaned up temporary directory: {download_result['temp_dir']}")
+                except OSError as e:
+                    self.logger.error(f"Error cleaning up temporary directory {download_result['temp_dir']}: {e}")
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    FastAPI Lifespan: Initializes the Telegram Application for each Uvicorn worker process.
-    """
-    global application, MAIN_LOOP
-    bot_logger.info("Initializing Telegram Application for Uvicorn worker...")
-    
-    # Initialize the global application object
-    application = await init_bot_async()
+# --- FastAPI Setup for Webhook ---
 
-    # Start the application internal update processing
-    await application.start()
-    
-    # CRITICAL: Store the main event loop reference here
-    MAIN_LOOP = asyncio.get_running_loop()
+app = FastAPI()
+bot = TelegramBot(token=BOT_TOKEN)
+application = bot.app 
 
-    bot_logger.info("Telegram Application ready in worker.")
-    yield # Server starts listening
-
-    # Cleanup: This runs when the server shuts down
-    await application.stop()
-    MAIN_LOOP = None # Clear loop reference on shutdown
-    bot_logger.info("Telegram Application shut down.")
+@app.on_event("startup")
+async def startup_event():
+    """Set the webhook on startup."""
+    if WEBHOOK_URL and BOT_TOKEN != 'YOUR_BOT_TOKEN':
+        # The URL must point to the /webhook endpoint
+        webhook_url = f"{WEBHOOK_URL}/webhook"
+        logger.info(f"Setting webhook to {webhook_url}")
+        # Use the base PTB Application object to set the webhook
+        await application.bot.set_webhook(url=webhook_url)
+    else:
+        logger.error("BOT_TOKEN or WEBHOOK_URL not configured. Cannot set webhook.")
 
 
-# Initialize FastAPI with the lifespan context manager
-app_fastapi = FastAPI(lifespan=lifespan)
-
-# --- Deployment Entry Points ---
-
-# Function required by the deployment command: python3 -c "import main; main.run_setup()"
-def run_setup():
-    """
-    Synchronously runs the async set_webhook_async function to register the webhook URL.
-    This runs in the initial Render build phase before Uvicorn starts.
-    """
-    # Use a new event loop to run the async setup synchronously
+@app.post("/webhook")
+async def webhook(request: Request):
+    """Handle incoming Telegram updates."""
     try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
-    # Register the webhook once
-    loop.run_until_complete(set_webhook_async())
-    
-    bot_logger.info("Bot setup complete (Webhook registered).")
-
-
-# FastAPI route to handle root path health checks
-@app_fastapi.get("/")
-def read_root():
-    """Returns a simple message for health checks."""
-    return {"message": "Telegram Bot Webhook Service is running"}
-
-
-# FastAPI route to receive Telegram updates
-@app_fastapi.post("/webhook")
-async def telegram_webhook(request: Request):
-    """Handles incoming Telegram updates via the webhook."""
-    global application
-    
-    if not application:
-        # This guard should rarely be hit now due to the lifespan manager
-        raise HTTPException(status_code=503, detail="Bot not initialized in worker.")
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
         
-    try:
-        # Get the update data from the request body
-        update_json = await request.json()
+        # Process the update using the PTB application
+        await application.process_update(update)
         
-        # Convert JSON data to Telegram Update object
-        update = Update.de_json(update_json, application.bot)
-        
-        # Put the update into the Application's internal queue for processing
-        await application.update_queue.put(update)
-
-        # Always return 200 OK immediately to Telegram
-        return Response(status_code=200)
-
+        return {"message": "OK"}
     except Exception as e:
-        bot_logger.error(f"Error processing webhook update: {e}")
-        # Return 200 OK even on error to prevent Telegram from retrying constantly
-        return Response(status_code=200)
+        logger.error(f"Error processing webhook update: {e}")
+        # Return 200 OK even on error to prevent Telegram from retrying endlessly
+        return {"message": "Error"}
 
-
-# --- Local Execution (Polling Fallback) ---
 
 if __name__ == "__main__":
-    """Runs the bot in polling mode for local development."""
-    bot_logger.info("Starting bot in LOCAL POLLING MODE...")
-    
-    if BOT_TOKEN == "7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY":
-        bot_logger.warning("Using hardcoded BOT_TOKEN for local testing.")
-
-    try:
-        # Initialize and run polling synchronously
-        app = asyncio.run(init_bot_async())
-        app.run_polling(allowed_updates=Update.ALL_TYPES)
-        
-    except Exception as e:
-        bot_logger.error(f"Failed to start bot in polling mode: {e}")
+    import uvicorn
+    logger.info(f"Starting FastAPI on port {PORT}")
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)
