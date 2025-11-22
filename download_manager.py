@@ -42,7 +42,6 @@ class DownloadManager:
                 return info["requested_downloads"][0]["filepath"]
             
             # 2. Fallback for single-file downloads (e.g., when merge is not used)
-            # This logic tries to find the largest file in the temp directory, assuming it's the video
             temp_dir = options['outtmpl'].rsplit('/', 1)[0]
             if os.path.isdir(temp_dir) and os.listdir(temp_dir):
                  files = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if os.path.isfile(os.path.join(temp_dir, f))]
@@ -69,7 +68,15 @@ class DownloadManager:
             download_info['temp_dir'] = temp_dir
             self.logger.info(f"[INIT] Temp folder created: {temp_dir}")
 
-            # --- BASE OPTIONS (Allows js2py auto-detection for decryption) ---
+            # --- EXTRACTOR FIX & BASE OPTIONS ---
+            # FIX: Explicitly set the player client to "default" as suggested by logs to resolve 
+            # the "No supported JavaScript runtime could be found" issue.
+            extractor_args = {
+                "youtube": {
+                    "player_client": ["default"], 
+                }
+            }
+            
             base_opts = {
                 "outtmpl": os.path.join(temp_dir, "%(title)s.%(ext)s"),
                 "quiet": True,
@@ -80,6 +87,7 @@ class DownloadManager:
                 "extractor_retries": 3,
                 "geo_bypass": True,
                 "force_generic_extractor": False,
+                "extractor_args": extractor_args, 
                 # Crucial file size limit
                 "max_filesize": self.max_file_size_bytes, 
                 "add_header": [
