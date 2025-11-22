@@ -1,6 +1,6 @@
+fastapi
+uvicorn
 python-telegram-bot
 yt-dlp
-Flask
-uvicorn
-requests
-Fastapi
+httpx
+js2py
