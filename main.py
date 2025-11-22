@@ -16,6 +16,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 import yt_dlp
+# Note: js2py dependency is now included in requirements.txt to provide the JS runtime.
 
 # --- Configuration ---
 # Set the port Uvicorn/FastAPI will listen on (Render default is 10000)
@@ -25,6 +26,9 @@ BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '7817163480:AAE4Z1dBE_LK9gTN75x
 
 # Public URL of the deployed service (e.g., https://your-service-name.onrender.com)
 WEBHOOK_URL = os.environ.get('WEBHOOK_BASE_URL', 'https://ff-like-bot-px1w.onrender.com') 
+
+# Define the path for the privacy policy URL. 
+PRIVACY_POLICY_PATH = "/privacy"
 
 # Set up logging
 logging.basicConfig(
@@ -143,8 +147,8 @@ class DownloadManager:
             'noprogress': True,
             'logger': self.logger,
             'allow_unplayable_formats': True,
-            # Workaround for missing JavaScript runtime (needed for YouTube)
-            'extractor_args': {'youtube': {'player_client': 'default'}},
+            # Removed 'extractor_args': {'youtube': {'player_client': 'default'}},
+            # as the installed js2py package handles the JS runtime now.
         }
 
         self.logger.info(f"Created temporary directory: {temp_dir}")
@@ -220,7 +224,7 @@ class TelegramBot:
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Sends a welcome message on /start."""
-        policy_url = f"{WEBHOOK_URL}/privacy"
+        policy_url = f"{WEBHOOK_URL}{PRIVACY_POLICY_PATH}"
         await update.message.reply_text(f'Hello! Send me a link to a video from Facebook, YouTube, or other supported sites, and I will try to download and send it to you. \n\n⚠️ **Note:** Videos over 50MB may fail due to upload size/time limits. The official [Privacy Policy]({policy_url}) is available here.', 
                                         parse_mode=ParseMode.MARKDOWN)
 
@@ -242,8 +246,11 @@ class TelegramBot:
                 error = download_result['error']
                 # Provide a more specific error message for common YouTube issues
                 youtube_hint = ""
-                if "Sign in to confirm" in error or "JavaScript runtime" in error:
-                    youtube_hint = "\n\n**Possible Cause:** The video requires sign-in (age restriction/private) or the server lacks a JavaScript engine needed to process complex YouTube formats."
+                # Added hint for the new JS runtime failure
+                if "Sign in to confirm" in error:
+                    youtube_hint = "\n\n**Possible Cause:** The video requires sign-in (age restriction/private). The bot cannot authenticate."
+                elif "JavaScript runtime" in error:
+                    youtube_hint = "\n\n**Possible Cause:** The video uses a highly complex format requiring a full JavaScript runtime to decrypt. While we've installed a fallback (js2py), the video's protection might be too advanced for it."
                 
                 await context.bot.edit_message_text(
                     chat_id=update.effective_chat.id, 
@@ -293,8 +300,8 @@ app = FastAPI()
 bot = TelegramBot(token=BOT_TOKEN)
 application = bot.app 
 
-# NEW PUBLIC WEB ENDPOINT FOR PRIVACY POLICY
-@app.get("/privacy", response_class=HTMLResponse)
+# PUBLIC WEB ENDPOINT FOR PRIVACY POLICY
+@app.get(PRIVACY_POLICY_PATH, response_class=HTMLResponse)
 async def get_privacy_policy():
     """Serves the privacy policy as a public HTML page."""
     return PRIVACY_POLICY_HTML
