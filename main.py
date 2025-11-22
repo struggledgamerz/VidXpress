@@ -85,7 +85,7 @@ PRIVACY_POLICY_HTML = """
 </head>
 <body>
     <div class="container">
-        <h1>VidXpress - Privacy Policy</h1>
+        <h1>VidXpress⚡ - Privacy Policy</h1>
         <p>This bot is designed solely to download and relay publicly accessible video content from external platforms (e.g., YouTube, Facebook).</p>
 
         <h2>1. Data Collection and Processing</h2>
