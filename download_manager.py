@@ -68,14 +68,11 @@ class DownloadManager:
             download_info['temp_dir'] = temp_dir
             self.logger.info(f"[INIT] Temp folder created: {temp_dir}")
 
-            # --- EXTRACTOR FIX & BASE OPTIONS ---
-            # FIX: Explicitly set the player client to "default" as suggested by logs to resolve 
-            # the "No supported JavaScript runtime could be found" issue.
-            extractor_args = {
-                "youtube": {
-                    "player_client": ["default"], 
-                }
-            }
+            # --- EXTRACTOR CONFIGURATION ---
+            # IMPORTANT FIX: By removing restrictive 'player_client' extractor_args, 
+            # we force yt-dlp to rely on its default logic, which should now detect 
+            # and utilize the installed 'js2py' for complex signature decryption.
+            extractor_args = {}
             
             base_opts = {
                 "outtmpl": os.path.join(temp_dir, "%(title)s.%(ext)s"),
@@ -87,7 +84,7 @@ class DownloadManager:
                 "extractor_retries": 3,
                 "geo_bypass": True,
                 "force_generic_extractor": False,
-                "extractor_args": extractor_args, 
+                "extractor_args": extractor_args, # Empty args to allow default JS detection
                 # Crucial file size limit
                 "max_filesize": self.max_file_size_bytes, 
                 "add_header": [
@@ -102,7 +99,7 @@ class DownloadManager:
                      "merge_output_format": "mp4"}
 
             try:
-                self.logger.info("[YDL] Attempt 1: MP4 priority (Max size: %sMB)", self.max_size_mb)
+                self.logger.info("[YDL] Attempt 1: MP4 priority (Max size: %sMB). Relying on js2py.", self.max_size_mb)
                 fpath = self._attempt(url, opts1)
                 if fpath:
                     download_info['file_path'] = fpath
@@ -110,6 +107,7 @@ class DownloadManager:
                     self.logger.info(f"[YDL] Attempt 1 successful. File: {fpath}")
                     return download_info
             except Exception as e:
+                # Log only the final error to reduce noise
                 self.logger.warning(f"[YDL] Attempt 1 failed. {type(e).__name__}: {e}")
                 download_info['error'] = str(e)
 
@@ -120,7 +118,7 @@ class DownloadManager:
                      "merge_output_format": None}
 
             try:
-                self.logger.info("[YDL] Attempt 2: BEST fallback (Max size: %sMB)", self.max_size_mb)
+                self.logger.info("[YDL] Attempt 2: BEST fallback (Max size: %sMB). Relying on js2py.", self.max_size_mb)
                 fpath = self._attempt(url, opts2)
                 if fpath:
                     download_info['file_path'] = fpath
@@ -138,4 +136,4 @@ class DownloadManager:
             self.logger.error(f"[SYSTEM ERROR] {type(e).__name__}: {e}")
             download_info['error'] = str(e)
             
-        return download_info
+        return download_info  
