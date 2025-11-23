@@ -69,10 +69,14 @@ class DownloadManager:
             self.logger.info(f"[INIT] Temp folder created: {temp_dir}")
 
             # --- EXTRACTOR CONFIGURATION ---
-            # IMPORTANT FIX: By removing restrictive 'player_client' extractor_args, 
-            # we force yt-dlp to rely on its default logic, which should now detect 
-            # and utilize the installed 'js2py' for complex signature decryption.
-            extractor_args = {}
+            # FIX: Explicitly forcing 'python' as the JavaScript runtime. 
+            # This ensures yt-dlp uses the installed 'js2py' (or other Python backends) 
+            # to handle signature decryption, overriding detection failures.
+            extractor_args = {
+                "youtube": {
+                    "js_runtime": "python",
+                }
+            }
             
             base_opts = {
                 "outtmpl": os.path.join(temp_dir, "%(title)s.%(ext)s"),
@@ -84,7 +88,7 @@ class DownloadManager:
                 "extractor_retries": 3,
                 "geo_bypass": True,
                 "force_generic_extractor": False,
-                "extractor_args": extractor_args, # Empty args to allow default JS detection
+                "extractor_args": extractor_args, 
                 # Crucial file size limit
                 "max_filesize": self.max_file_size_bytes, 
                 "add_header": [
@@ -99,7 +103,7 @@ class DownloadManager:
                      "merge_output_format": "mp4"}
 
             try:
-                self.logger.info("[YDL] Attempt 1: MP4 priority (Max size: %sMB). Relying on js2py.", self.max_size_mb)
+                self.logger.info("[YDL] Attempt 1: MP4 priority (Max size: %sMB). Forcing JS Runtime 'python'.", self.max_size_mb)
                 fpath = self._attempt(url, opts1)
                 if fpath:
                     download_info['file_path'] = fpath
@@ -118,7 +122,7 @@ class DownloadManager:
                      "merge_output_format": None}
 
             try:
-                self.logger.info("[YDL] Attempt 2: BEST fallback (Max size: %sMB). Relying on js2py.", self.max_size_mb)
+                self.logger.info("[YDL] Attempt 2: BEST fallback (Max size: %sMB). Forcing JS Runtime 'python'.", self.max_size_mb)
                 fpath = self._attempt(url, opts2)
                 if fpath:
                     download_info['file_path'] = fpath
@@ -136,4 +140,4 @@ class DownloadManager:
             self.logger.error(f"[SYSTEM ERROR] {type(e).__name__}: {e}")
             download_info['error'] = str(e)
             
-        return download_info  
+        return download_info
