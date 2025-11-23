@@ -1,145 +1,86 @@
+import yt_dlp
 import os
-import tempfile
-import logging
 import shutil
-from typing import Dict, Any, Union
+import logging
+import tempfile
 
-from yt_dlp import YoutubeDL
+# DownloadManager ke liye logging set up karein
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('DownloadManager')
+
+# User dwara di gayi cookies file ka path.
+# **DHYAN RAKHEIN:** Yah file server ke execution directory mein honi chahiye.
+COOKIE_FILE_PATH = "yt_cookies.json" 
 
 class DownloadManager:
     """
-    Manages yt-dlp download operations with custom settings, including file size limits
-    and robust error handling.
+    YouTube URLs se video download ko manage karta hai.
     """
-    def __init__(self, max_file_size_bytes: int):
+    def __init__(self):
+        self.temp_dir = None
+
+    def __enter__(self):
+        # Download ke liye ek temporary directory banata hai
+        self.temp_dir = tempfile.mkdtemp()
+        logger.info(f"Temporary directory created: {self.temp_dir}")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Kaam poora hone ke baad temporary directory ko delete karta hai
+        if self.temp_dir and os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir)
+            logger.info(f"Temporary directory deleted: {self.temp_dir}")
+
+    def download_video(self, url: str) -> str:
         """
-        Initializes the DownloadManager with the maximum allowed file size.
-
-        :param max_file_size_bytes: The size limit for the downloaded file in bytes.
+        Diye gaye URL se video download karta hai.
+        :param url: YouTube video URL.
+        :return: Download ki gayi video file ka path.
         """
-        self.logger = logging.getLogger('DownloadManager')
-        self.max_file_size_bytes = max_file_size_bytes
-        self.max_size_mb = self.max_file_size_bytes / 1024 / 1024
-        
-        # Ensure logger is set up for visibility
-        if not self.logger.handlers:
-            self.logger.setLevel(logging.INFO)
-            sh = logging.StreamHandler()
-            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            sh.setFormatter(formatter)
-            self.logger.addHandler(sh)
+        if not self.temp_dir:
+            raise Exception("DownloadManager must be used within a 'with' statement.")
 
-
-    def _attempt(self, url: str, options: dict) -> str | None:
-        """Internal helper for yt-dlp download, extracts info and triggers download."""
-        with YoutubeDL(options) as ydl:
-            # Use extract_info to trigger the download process
-            info = ydl.extract_info(url, download=True)
+        # yt-dlp options (YDL Options)
+        ydl_opts = {
+            # Files ko temporary directory mein store karo
+            'outtmpl': os.path.join(self.temp_dir, '%(title)s.%(ext)s'),
+            # Sabse acchi format chuno (MP4 compatibility ke liye)
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            # Authentication ke liye di gayi cookies file ka istemaal karo
+            'cookiefile': COOKIE_FILE_PATH, # <--- Yah hai woh integration
+            # Console output ko kam karo
+            'quiet': True,
+            'noprogress': True, # Progress bar ko disable karo
+            'no_warnings': False, # Warnings ko dikhao
+            'logger': logger, # Custom logger ka istemaal karo
             
-            # 1. Standard result path (best practice for merge_output_format)
-            if info and "requested_downloads" in info and info["requested_downloads"]:
-                # Assuming the first downloaded file is the result
-                return info["requested_downloads"][0]["filepath"]
-            
-            # 2. Fallback for single-file downloads (e.g., when merge is not used)
-            temp_dir = options['outtmpl'].rsplit('/', 1)[0]
-            if os.path.isdir(temp_dir) and os.listdir(temp_dir):
-                 files = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if os.path.isfile(os.path.join(temp_dir, f))]
-                 if files:
-                    return max(files, key=os.path.getsize)
-
-            return None
-
-    def download(self, url: str) -> Dict[str, Union[str, bool]]:
-        """
-        Attempts to download the video from the given URL using a two-attempt logic 
-        (MP4 priority then BEST fallback).
-        """
-        temp_dir = None
-        download_info = {
-            'success': False,
-            'file_path': None,
-            'error': None,
-            'temp_dir': None
         }
 
         try:
-            temp_dir = tempfile.mkdtemp()
-            download_info['temp_dir'] = temp_dir
-            self.logger.info(f"[INIT] Temp folder created: {temp_dir}")
-            
-            # NOTE: We have tried auto-detecting, forcing 'python' runtime, 
-            # and forcing 'default'/'android' clients, all failed.
-            # This is the final, aggressive workaround attempt to bypass the JS requirement
-            # by pretending to be an iOS client, which sometimes gets simpler streams.
+            logger.info(f"Attempting download with cookies from: {COOKIE_FILE_PATH}")
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info_dict = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info_dict)
+                logger.info(f"Download successful: {filename}")
+                return filename
 
-            # --- EXTRACTOR CONFIGURATION (Using aggressive workaround) ---
-            extractor_args = {
-                "youtube": {
-                    "player_client": "ios", # Aggressive workaround to simplify stream requirements
-                }
-            }
-            
-            base_opts = {
-                "outtmpl": os.path.join(temp_dir, "%(title)s.%(ext)s"),
-                "quiet": True,
-                "noplaylist": True,
-                "ignoreerrors": False,
-                "logger": self.logger,
-                "retries": 2,
-                "extractor_retries": 3,
-                "geo_bypass": True,
-                "force_generic_extractor": False,
-                "extractor_args": extractor_args, 
-                # Crucial file size limit
-                "max_filesize": self.max_file_size_bytes, 
-                "add_header": [
-                    ("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
-                    ("Accept-Language", "en-US,en;q=0.9"),
-                ]
-            }
-
-            # ------ ATTEMPT 1: Best MP4 (Telegram preferred) ------
-            opts1 = {**base_opts,
-                     "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-                     "merge_output_format": "mp4"}
-
-            try:
-                self.logger.info("[YDL] Attempt 1: MP4 priority (Max size: %sMB). Forcing Player Client 'ios'.", self.max_size_mb)
-                fpath = self._attempt(url, opts1)
-                if fpath:
-                    download_info['file_path'] = fpath
-                    download_info['success'] = True
-                    self.logger.info(f"[YDL] Attempt 1 successful. File: {fpath}")
-                    return download_info
-            except Exception as e:
-                # Log only the final error to reduce noise
-                self.logger.warning(f"[YDL] Attempt 1 failed. {type(e).__name__}: {e}")
-                download_info['error'] = str(e)
-
-
-            # ------ ATTEMPT 2: Any BEST format (Fallback) ------
-            opts2 = {**base_opts,
-                     "format": "best",
-                     "merge_output_format": None}
-
-            try:
-                self.logger.info("[YDL] Attempt 2: BEST fallback (Max size: %sMB). Forcing Player Client 'ios'.", self.max_size_mb)
-                fpath = self._attempt(url, opts2)
-                if fpath:
-                    download_info['file_path'] = fpath
-                    download_info['success'] = True
-                    self.logger.info(f"[YDL] Attempt 2 successful. File: {fpath}")
-                    return download_info
-            except Exception as e:
-                self.logger.error(f"[YDL] Attempt 2 failed. {type(e).__name__}: {e}")
-                download_info['error'] = str(e)
-
-            if not download_info['success']:
-                self.logger.error("[YDL] All download attempts failed.")
-
+        except yt_dlp.utils.DownloadError as e:
+            logger.error(f"Download failed. Reason: {e}")
+            raise Exception(f"YouTube Download Error: {str(e)}")
         except Exception as e:
-            self.logger.error(f"[SYSTEM ERROR] {type(e).__name__}: {e}")
-            download_info['error'] = str(e)
-            
-        return download_info
+            logger.error(f"An unexpected error occurred: {e}")
+            raise
+
+# Example usage (integrated application mein is block ko hata dein)
+if __name__ == '__main__':
+    video_url = "https://youtube.com/shorts/JdG0xiu2I6Y" # NileRed video URL
+    
+    print(f"Testing download for URL: {video_url}")
+    print(f"NOTE: Agar '{COOKIE_FILE_PATH}' file maujood nahi hai toh yeh test fail ho jayega.")
+    
+    try:
+        with DownloadManager() as dm:
+            downloaded_path = dm.download_video(video_url)
+            print(f"Successfully downloaded to: {downloaded_path}")
+    except Exception as e:
+        print(f"Final Test Error: {e}")
