@@ -67,14 +67,16 @@ class DownloadManager:
             temp_dir = tempfile.mkdtemp()
             download_info['temp_dir'] = temp_dir
             self.logger.info(f"[INIT] Temp folder created: {temp_dir}")
+            
+            # NOTE: We have tried auto-detecting, forcing 'python' runtime, 
+            # and forcing 'default'/'android' clients, all failed.
+            # This is the final, aggressive workaround attempt to bypass the JS requirement
+            # by pretending to be an iOS client, which sometimes gets simpler streams.
 
-            # --- EXTRACTOR CONFIGURATION ---
-            # FIX: Explicitly forcing 'python' as the JavaScript runtime. 
-            # This ensures yt-dlp uses the installed 'js2py' (or other Python backends) 
-            # to handle signature decryption, overriding detection failures.
+            # --- EXTRACTOR CONFIGURATION (Using aggressive workaround) ---
             extractor_args = {
                 "youtube": {
-                    "js_runtime": "python",
+                    "player_client": "ios", # Aggressive workaround to simplify stream requirements
                 }
             }
             
@@ -103,7 +105,7 @@ class DownloadManager:
                      "merge_output_format": "mp4"}
 
             try:
-                self.logger.info("[YDL] Attempt 1: MP4 priority (Max size: %sMB). Forcing JS Runtime 'python'.", self.max_size_mb)
+                self.logger.info("[YDL] Attempt 1: MP4 priority (Max size: %sMB). Forcing Player Client 'ios'.", self.max_size_mb)
                 fpath = self._attempt(url, opts1)
                 if fpath:
                     download_info['file_path'] = fpath
@@ -122,7 +124,7 @@ class DownloadManager:
                      "merge_output_format": None}
 
             try:
-                self.logger.info("[YDL] Attempt 2: BEST fallback (Max size: %sMB). Forcing JS Runtime 'python'.", self.max_size_mb)
+                self.logger.info("[YDL] Attempt 2: BEST fallback (Max size: %sMB). Forcing Player Client 'ios'.", self.max_size_mb)
                 fpath = self._attempt(url, opts2)
                 if fpath:
                     download_info['file_path'] = fpath
