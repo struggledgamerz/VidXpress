@@ -350,8 +350,18 @@ async def run_bot_polling():
         except Exception as e:
             logger.error(f"Error in bot polling: {e}")
         finally:
+            # Graceful shutdown
             if application:
-                await application.stop()
+                try:
+                    await application.updater.stop()
+                    logger.info("Stopped polling for updates")
+                except Exception:
+                    pass
+                try:
+                    await application.stop()
+                    logger.info("Bot application stopped")
+                except Exception:
+                    pass
     else:
         logger.warning("Bot polling not started - TELEGRAM_BOT_TOKEN not configured.")
         logger.info("Server is running in web-only mode. Privacy policy is available at /privacy")

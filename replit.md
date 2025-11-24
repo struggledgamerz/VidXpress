@@ -1,17 +1,18 @@
 # VidXpress⚡ - Telegram Video Download Bot
 
 ## Overview
-VidXpress is a Telegram bot that downloads videos from various platforms (YouTube, Facebook, and other sites supported by yt-dlp) and sends them directly to users via Telegram. The bot uses FastAPI as a webhook receiver and yt-dlp for video downloading.
+VidXpress is a Telegram bot that downloads videos from various platforms (YouTube, Facebook, and other sites supported by yt-dlp) and sends them directly to users via Telegram. The bot uses polling mode to receive messages and FastAPI to serve a privacy policy page.
 
-**Current State**: The application is successfully set up in Replit and running. The web server is active and serving the privacy policy page. The Telegram bot functionality requires configuration of the TELEGRAM_BOT_TOKEN environment variable to become fully operational.
+**Current State**: The application is fully operational in Replit! The bot is running in polling mode, actively checking for new messages from Telegram. The web server is also active and serving the privacy policy page. No deployment or paid plan is required - everything works on Replit's free plan!
 
 ## Recent Changes (November 24, 2025)
 - Imported GitHub project and configured for Replit environment
 - Updated port configuration to use port 5000 (Replit's webview port)
-- Added auto-detection of Replit environment variables (REPL_SLUG, REPL_OWNER)
-- Made bot initialization graceful when TELEGRAM_BOT_TOKEN is not set
+- **Converted from webhook mode to polling mode for free plan compatibility**
+- Made bot run concurrently with FastAPI server
+- Added graceful bot initialization when TELEGRAM_BOT_TOKEN is not set
 - Added root endpoint (/) to verify service status
-- Configured deployment settings for autoscale deployment
+- Configured for Replit free plan (no deployment required)
 - Created comprehensive documentation
 
 ## Project Architecture
@@ -42,12 +43,12 @@ VidXpress is a Telegram bot that downloads videos from various platforms (YouTub
 - **Port**: 5000 (configured for Replit webview)
 - **Host**: 0.0.0.0 (accepts all connections)
 - **Endpoints**:
-  - `GET /` - Status endpoint showing bot configuration
+  - `GET /` - Status endpoint showing bot configuration and mode
   - `GET /privacy` - Privacy policy page (HTML)
-  - `POST /webhook` - Telegram webhook receiver
 
 #### 2. Telegram Bot
-- Uses webhook mode (not polling)
+- Uses **polling mode** (actively checks for messages every few seconds)
+- Works on Replit's free plan without needing deployment
 - Handles `/start` command and text messages containing URLs
 - Downloads videos up to 50MB to prevent timeouts
 - Automatically cleans up temporary files after upload
@@ -64,13 +65,7 @@ VidXpress is a Telegram bot that downloads videos from various platforms (YouTub
 - `TELEGRAM_BOT_TOKEN` - Your Telegram bot token from @BotFather (currently not set)
 
 ### Auto-Detected (Replit)
-- `REPL_SLUG` - Automatically set by Replit (your repl name)
-- `REPL_OWNER` - Automatically set by Replit (your username)
-- These are used to construct the webhook URL: `https://{REPL_SLUG}.{REPL_OWNER}.repl.co`
-
-### Optional Overrides
 - `PORT` - Server port (defaults to 5000)
-- `WEBHOOK_BASE_URL` - Manual webhook URL override (auto-detected from Replit vars if not set)
 
 ## How to Enable the Telegram Bot
 
@@ -87,20 +82,23 @@ VidXpress is a Telegram bot that downloads videos from various platforms (YouTub
 
 3. **Restart the Application**:
    - The workflow will automatically restart
-   - The bot will configure its webhook on startup
-   - Your bot will be ready to receive messages!
+   - The bot will start polling for messages
+   - Your bot will be ready to receive messages immediately!
+   - **No deployment needed** - works on free plan!
 
-## Current Development Mode
+## Current Mode
 
-The application is currently running in **web-only mode** because `TELEGRAM_BOT_TOKEN` is not configured. You can:
-- Access the status page at the root URL (/)
-- View the privacy policy at /privacy
-- The webhook endpoint (/webhook) is available but inactive
+The application is running in **polling mode** and is fully operational! The bot is:
+- ✅ Actively polling Telegram for new messages
+- ✅ Processing video download requests
+- ✅ Serving the privacy policy at /privacy
+- ✅ Working on Replit's free plan (no deployment needed)
 
-Once you add the TELEGRAM_BOT_TOKEN, the bot will automatically:
-- Initialize the Telegram bot application
-- Configure the webhook with Telegram's servers
-- Start processing video download requests
+The bot uses polling mode, which means:
+- No public URL or webhook required
+- Works perfectly on Replit's free plan
+- Checks for new messages every few seconds
+- No need for deployment or paid subscription
 
 ## Bot Usage (When Configured)
 
@@ -116,15 +114,20 @@ Users interact with the bot by:
 
 ## Deployment
 
-The project is configured for Replit autoscale deployment:
+**No deployment needed!** The bot works perfectly on Replit's free plan using polling mode.
+
+If you still want to deploy (optional):
+- The project is configured for Replit autoscale deployment
 - **Type**: autoscale (stateless, scales to zero when inactive)
 - **Command**: `python main.py`
 - **Port**: 5000 (automatically exposed)
 
-To deploy:
-1. Ensure TELEGRAM_BOT_TOKEN is set in production secrets
-2. Click the "Deploy" button in Replit
-3. The bot will be available at your deployment URL
+Benefits of deployment:
+- Persistent uptime even when not viewing Replit
+- Custom domain support
+- Better for production use
+
+For most users, running directly in Replit is sufficient!
 
 ## Privacy & Data Handling
 
@@ -135,8 +138,9 @@ To deploy:
 ## Troubleshooting
 
 ### Bot Not Responding
-- Check that TELEGRAM_BOT_TOKEN is set correctly
-- Verify the webhook URL is accessible (check logs)
+- Check that TELEGRAM_BOT_TOKEN is set correctly in Secrets
+- Verify the workflow is running (check Console tab)
+- Look for "Bot is now polling for messages!" in the logs
 - Ensure the bot is not blocked by Telegram
 
 ### Download Failures
