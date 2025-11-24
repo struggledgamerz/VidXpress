@@ -3,7 +3,9 @@ import tempfile
 import logging
 import shutil
 import asyncio 
+import time
 from typing import Dict, Any, Union
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
@@ -41,6 +43,9 @@ logger = logging.getLogger(__name__)
 
 # Maximum file size for Telegram bot API upload in bytes (50 MB limit)
 MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024 
+
+# --- Global Telegram Application Object ---
+application = None # Initialize globally
 
 # --- Static Privacy Policy Content (for the web endpoint) ---
 PRIVACY_POLICY_HTML = """
@@ -117,7 +122,6 @@ PRIVACY_POLICY_HTML = """
 
 class DownloadManager:
     """Manages yt-dlp download operations with custom settings."""
-    # ... (DownloadManager logic remains the same)
     def __init__(self):
         self.logger = logging.getLogger('DownloadManager')
 
@@ -141,9 +145,7 @@ class DownloadManager:
         # yt-dlp options (Attempt 1: Simple MP4 priority)
         ydl_opts = {
             'outtmpl': output_template,
-            # Filter by max file size to prevent timeouts on large uploads.
             'max_filesize': MAX_FILE_SIZE_BYTES, 
-            # Prioritize best MP4 format (which Telegram wants), then best overall. 
             'format': 'best[ext=mp4]/best', 
             'noplaylist': True,
             'quiet': True,
@@ -159,12 +161,10 @@ class DownloadManager:
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info_dict = ydl.extract_info(url, download=True)
-                # Find the actual downloaded file path
                 downloaded_files = []
                 if 'requested_downloads' in info_dict:
                     downloaded_files = [f['filepath'] for f in info_dict['requested_downloads'] if os.path.exists(f['filepath'])]
                 
-                # Secondary check for files written directly to temp_dir
                 if not downloaded_files and os.listdir(temp_dir):
                     for filename in os.listdir(temp_dir):
                         if filename.startswith(info_dict.get('id', '')):
@@ -217,10 +217,8 @@ class TelegramBot:
     """The main Telegram Bot logic and handlers."""
     def __init__(self, token: str):
         self.download_manager = DownloadManager()
-        # Webhook mode ke liye, URL aur Path ki zarurat hai
         self.app = ApplicationBuilder().token(token).build()
         
-        # Handlers: Only start and message handler 
         self.app.add_handler(CommandHandler("start", self.start))
         self.app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message))
         self.logger = logging.getLogger('TelegramBot')
@@ -241,7 +239,7 @@ class TelegramBot:
         # 2. Start download
         download_result = {'temp_dir': None}
         try:
-            # --- CRITICAL STABILITY FIX: Running blocking I/O in a separate thread ---
+            # --- CRITICAL FIX: Running blocking I/O in a separate thread ---
             download_result = await asyncio.to_thread(self.download_manager.download, url)
             temp_dir = download_result['temp_dir']
             
@@ -251,10 +249,9 @@ class TelegramBot:
                 # Provide a more specific error message for common YouTube issues
                 youtube_hint = ""
                 if "Sign in to confirm" in error or "cookies" in error:
-                    # Clearer message that the bot cannot access authenticated videos
                     youtube_hint = "\n\n**🛑 UNABLE TO ACCESS (SIGN-IN REQUIRED):** This video is age-restricted, private, or requires authentication (cookies). The bot cannot log in to YouTube, making this video permanently inaccessible."
                 elif "JavaScript runtime" in error:
-                    youtube_hint = "\n\n**Possible Cause:** The video uses a highly complex format requiring a full JavaScript runtime to decrypt. While we've installed a fallback (js2py), the video's protection might be too advanced for it."
+                    youtube_hint = "\n\n**Possible Cause:** The video uses a highly complex format requiring a full JavaScript runtime to decrypt."
                 
                 await context.bot.edit_message_text(
                     chat_id=update.effective_chat.id, 
@@ -272,10 +269,10 @@ class TelegramBot:
             await processing_message.delete()
             
             # 4b. Send the file 
-            # Check if file_path exists before trying to open it
             if not os.path.exists(file_path):
                  raise FileNotFoundError(f"Downloaded file not found at path: {file_path}")
 
+            # Send the video file
             await update.message.reply_video(
                 video=open(file_path, 'rb'),
                 caption=f"✅ Downloaded successfully!",
@@ -302,32 +299,62 @@ class TelegramBot:
                 except OSError as e:
                     self.logger.error(f"Error cleaning up temporary directory {download_result['temp_dir']}: {e}")
 
-# --- FastAPI Setup for Webhook Mode ---
+# --- FastAPI Lifespan Manager ---
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initializes and shuts down the Telegram Bot Application."""
+    global application
 
-# Global application object (initial placeholder)
-application = None
+    if BOT_TOKEN and WEBHOOK_URL:
+        # --- Startup ---
+        logger.info("Starting up Telegram Application...")
+        bot_instance = TelegramBot(token=BOT_TOKEN)
+        application = bot_instance.app
+        
+        # 1. Initialize the application (fixes the "not initialized" error)
+        await application.initialize() 
+        
+        # 2. Start the application
+        await application.start()
+        
+        # 3. Set the webhook (dropping pending updates ensures a clean start)
+        full_webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+        try:
+            # We wait for 1 second to ensure the app server is definitely ready 
+            # before making the external API call, reducing the chance of internal timeouts.
+            await asyncio.sleep(1) 
+            await application.bot.set_webhook(url=full_webhook_url, drop_pending_updates=True)
+            logger.info(f"✅ Webhook successfully set to: {full_webhook_url}")
+        except Exception as e:
+            logger.error(f"❌ FATAL ERROR: Failed to set Webhook. Check BOT_TOKEN and WEBHOOK_BASE_URL. Reason: {e}")
 
-# Only initialize bot if token and URL are provided
-if BOT_TOKEN and WEBHOOK_URL:
-    bot = TelegramBot(token=BOT_TOKEN)
-    application = bot.app
-    logger.info("Telegram Application object successfully created.")
-    logger.info(f"Configured Webhook Path: {WEBHOOK_PATH}")
-else:
-    logger.warning("Bot not fully configured - TELEGRAM_BOT_TOKEN and/or WEBHOOK_BASE_URL not set.") 
+    else:
+        logger.warning("Bot not fully configured - TELEGRAM_BOT_TOKEN and/or WEBHOOK_BASE_URL not set.") 
+    
+    # Yield control to the FastAPI server while the bot is running
+    yield
+    
+    # --- Shutdown ---
+    if application:
+        logger.info("Shutting down Telegram Application...")
+        await application.stop()
+        logger.info("Application shut down successfully.")
+    
+# --- FastAPI App Initialization ---
+app = FastAPI(lifespan=lifespan)
+
 
 # WEBHOOK ENDPOINT
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
     """Receives updates from Telegram via webhook."""
-    if not application:
-        logger.error("Webhook received but application is not initialized.")
+    if not application or not application.started:
+        logger.error("Webhook received but application is not initialized or started.")
+        # Return 200 OK so Telegram doesn't keep retrying, but log the error
         return {"status": "error", "message": "Bot not ready."}
         
     try:
-        # Get the JSON update from the request
         data = await request.json()
         update = Update.de_json(data, application.bot)
         
@@ -343,11 +370,12 @@ async def telegram_webhook(request: Request):
 @app.get("/")
 async def root():
     """Root endpoint to verify the service is running and provides diagnostic info."""
+    full_webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
     return {
         "message": "VidXpress Telegram Bot is running!",
         "status": "active",
         "mode": "WEBHOOK",
-        "configured_webhook_url": f"{WEBHOOK_URL}{WEBHOOK_PATH}",
+        "configured_webhook_url": full_webhook_url,
         "privacy_policy_path": f"{PRIVACY_POLICY_PATH}",
     }
 
@@ -355,42 +383,3 @@ async def root():
 async def get_privacy_policy():
     """Serves the privacy policy as a public HTML page."""
     return PRIVACY_POLICY_HTML
-
-
-async def set_webhook_and_start_fastapi():
-    """Sets the Telegram webhook and starts the FastAPI server."""
-    
-    if application and WEBHOOK_URL:
-        # 1. Start the bot application 
-        await application.start()
-        logger.info("Bot application started.")
-        
-        # 2. Set the webhook with Telegram
-        full_webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-        try:
-            await application.bot.set_webhook(url=full_webhook_url, drop_pending_updates=True)
-            logger.info(f"✅ Webhook successfully set to: {full_webhook_url}")
-        except Exception as e:
-            logger.error(f"❌ FATAL ERROR: Failed to set Webhook. Check BOT_TOKEN and WEBHOOK_BASE_URL. Reason: {e}")
-            # If webhook fails, we cannot proceed, but we continue to run FastAPI for diagnostics.
-
-    # 3. Start the FastAPI Uvicorn Server
-    import uvicorn
-    config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info")
-    server = uvicorn.Server(config)
-    await server.serve()
-    
-async def main():
-    """Main entry point."""
-    logger.info(f"Starting VidXpress Bot Application in WEBHOOK Mode on port {PORT}")
-    
-    # Run the setup and server
-    await set_webhook_and_start_fastapi()
-    
-
-if __name__ == "__main__":
-    try:
-        # Use asyncio.run(main()) to start the whole application
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Shutting down gracefully...")
