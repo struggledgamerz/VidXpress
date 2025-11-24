@@ -300,7 +300,7 @@ class TelegramBot:
                 except OSError as e:
                     self.logger.error(f"Error cleaning up temporary directory {download_result['temp_dir']}: {e}")
 
-# --- FastAPI Setup for Webhook ---
+# --- FastAPI Setup for Polling Mode ---
 
 app = FastAPI()
 
@@ -321,7 +321,7 @@ async def root():
         "message": "VidXpress Telegram Bot is running!",
         "status": "active",
         "privacy_policy": f"{PRIVACY_POLICY_PATH}",
-        "webhook_configured": bool(WEBHOOK_URL and BOT_TOKEN)
+        "mode": "polling" if BOT_TOKEN else "web-only"
     }
 
 @app.get(PRIVACY_POLICY_PATH, response_class=HTMLResponse)
@@ -330,63 +330,60 @@ async def get_privacy_policy():
     return PRIVACY_POLICY_HTML
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize PTB application and set the webhook on startup."""
-    if application and WEBHOOK_URL and BOT_TOKEN:
+async def run_bot_polling():
+    """Run the Telegram bot in polling mode."""
+    if application and BOT_TOKEN:
         try:
-            # FIX: Explicitly initialize and start the PTB application for webhook readiness
+            logger.info("Starting Telegram bot in polling mode...")
             await application.initialize()
-            
-            # Set the webhook
-            webhook_url = f"{WEBHOOK_URL}/webhook"
-            logger.info(f"Setting webhook to {webhook_url}")
-            await application.bot.set_webhook(url=webhook_url)
-
-            # Start the application instance (required for process_update to work)
             await application.start()
-            logger.info("Bot webhook configured successfully!")
+            logger.info("✅ Bot is now polling for messages!")
+            
+            # Start polling for updates
+            await application.updater.start_polling(drop_pending_updates=True)
+            
+            # Keep running until stopped
+            import asyncio
+            while True:
+                await asyncio.sleep(1)
+                
         except Exception as e:
-            logger.error(f"Failed to configure webhook: {e}")
-            logger.warning("Bot will run in development mode without webhook until TELEGRAM_BOT_TOKEN is provided.")
+            logger.error(f"Error in bot polling: {e}")
+        finally:
+            if application:
+                await application.stop()
     else:
-        logger.warning("BOT_TOKEN or WEBHOOK_URL not configured. Set TELEGRAM_BOT_TOKEN environment variable to enable the bot.")
+        logger.warning("Bot polling not started - TELEGRAM_BOT_TOKEN not configured.")
         logger.info("Server is running in web-only mode. Privacy policy is available at /privacy")
 
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Stop the PTB application on shutdown."""
-    if application and WEBHOOK_URL and BOT_TOKEN:
-        try:
-            # Cleanly stop the application on service shutdown
-            await application.stop()
-        except Exception as e:
-            logger.error(f"Error during shutdown: {e}")
+async def run_fastapi_server():
+    """Run the FastAPI server."""
+    import uvicorn
+    config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info")
+    server = uvicorn.Server(config)
+    await server.serve()
 
 
-@app.post("/webhook")
-async def webhook(request: Request):
-    """Handle incoming Telegram updates."""
-    if not application:
-        return {"message": "Bot not configured"}
+async def main():
+    """Run both FastAPI server and bot polling concurrently."""
+    import asyncio
     
-    try:
-        data = await request.json()
-        update = Update.de_json(data, application.bot)
-        
-        # Process the update using the PTB application
-        await application.process_update(update)
-        
-        return {"message": "OK"}
-    except Exception as e:
-        logger.error(f"Error processing webhook update: {e}")
-        # Return 200 OK even on error to prevent Telegram from retrying endlessly
-        return {"message": "Error"}
+    logger.info(f"Starting VidXpress Bot Application on port {PORT}")
+    logger.info(f"Mode: {'Polling' if BOT_TOKEN else 'Web-only'}")
+    
+    # Run both tasks concurrently
+    tasks = [run_fastapi_server()]
+    
+    if BOT_TOKEN:
+        tasks.append(run_bot_polling())
+    
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
-    import uvicorn
-    logger.info(f"Starting FastAPI on port {PORT}")
-    logger.info(f"Webhook URL: {WEBHOOK_URL}")
-    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
+    import asyncio
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Shutting down gracefully...")
