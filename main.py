@@ -24,10 +24,12 @@ PORT = int(os.environ.get('PORT', 5000))
 # Your Bot Token goes here
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 
-# Public URL of the deployed service (e.g., https://my-vidxpress-bot.onrender.com)
+# Public URL of the deployed service (e.g., https://ff-like-bot-px1w.onrender.com)
+# THIS MUST BE SET IN RENDER ENVIRONMENT VARIABLES
 WEBHOOK_URL = os.environ.get('WEBHOOK_BASE_URL', '') 
 
-# Define the path for the privacy policy URL. 
+# Define the path for the webhook and privacy policy URL. 
+WEBHOOK_PATH = f"/{BOT_TOKEN}" if BOT_TOKEN else "/webhook"
 PRIVACY_POLICY_PATH = "/privacy"
 
 # Set up logging
@@ -115,6 +117,7 @@ PRIVACY_POLICY_HTML = """
 
 class DownloadManager:
     """Manages yt-dlp download operations with custom settings."""
+    # ... (DownloadManager logic remains the same)
     def __init__(self):
         self.logger = logging.getLogger('DownloadManager')
 
@@ -214,6 +217,7 @@ class TelegramBot:
     """The main Telegram Bot logic and handlers."""
     def __init__(self, token: str):
         self.download_manager = DownloadManager()
+        # Webhook mode ke liye, URL aur Path ki zarurat hai
         self.app = ApplicationBuilder().token(token).build()
         
         # Handlers: Only start and message handler 
@@ -298,31 +302,53 @@ class TelegramBot:
                 except OSError as e:
                     self.logger.error(f"Error cleaning up temporary directory {download_result['temp_dir']}: {e}")
 
-# --- FastAPI Setup for Polling Mode ---
+# --- FastAPI Setup for Webhook Mode ---
 
 app = FastAPI()
 
 # Global application object (initial placeholder)
 application = None
 
-# Only initialize bot if token is provided
-if BOT_TOKEN:
+# Only initialize bot if token and URL are provided
+if BOT_TOKEN and WEBHOOK_URL:
     bot = TelegramBot(token=BOT_TOKEN)
     application = bot.app
-    # New log check added here to confirm application initialization
     logger.info("Telegram Application object successfully created.")
+    logger.info(f"Configured Webhook Path: {WEBHOOK_PATH}")
 else:
-    logger.warning("Bot not initialized - TELEGRAM_BOT_TOKEN not set") 
+    logger.warning("Bot not fully configured - TELEGRAM_BOT_TOKEN and/or WEBHOOK_BASE_URL not set.") 
+
+# WEBHOOK ENDPOINT
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(request: Request):
+    """Receives updates from Telegram via webhook."""
+    if not application:
+        logger.error("Webhook received but application is not initialized.")
+        return {"status": "error", "message": "Bot not ready."}
+        
+    try:
+        # Get the JSON update from the request
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
+        
+        # Process the update
+        await application.process_update(update)
+        
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Error processing update: {e}")
+        return {"status": "error", "message": str(e)}
 
 # PUBLIC WEB ENDPOINTS
 @app.get("/")
 async def root():
-    """Root endpoint to verify the service is running."""
+    """Root endpoint to verify the service is running and provides diagnostic info."""
     return {
         "message": "VidXpress Telegram Bot is running!",
         "status": "active",
-        "privacy_policy": f"{PRIVACY_POLICY_PATH}",
-        "mode": "polling" if BOT_TOKEN else "web-only"
+        "mode": "WEBHOOK",
+        "configured_webhook_url": f"{WEBHOOK_URL}{WEBHOOK_PATH}",
+        "privacy_policy_path": f"{PRIVACY_POLICY_PATH}",
     }
 
 @app.get(PRIVACY_POLICY_PATH, response_class=HTMLResponse)
@@ -331,76 +357,36 @@ async def get_privacy_policy():
     return PRIVACY_POLICY_HTML
 
 
-async def run_bot_polling():
-    """Run the Telegram bot in polling mode."""
-    if application and BOT_TOKEN:
+async def set_webhook_and_start_fastapi():
+    """Sets the Telegram webhook and starts the FastAPI server."""
+    
+    if application and WEBHOOK_URL:
+        # 1. Start the bot application 
+        await application.start()
+        logger.info("Bot application started.")
+        
+        # 2. Set the webhook with Telegram
+        full_webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
         try:
-            logger.info("Starting Telegram bot in polling mode...")
-            await application.initialize()
-            
-            # --- Diagnostic Check: Verify token and connectivity before starting polling ---
-            try:
-                bot_info = await application.bot.get_me()
-                logger.info(f"Connected to Telegram API successfully. Bot username: @{bot_info.username}")
-            except Exception as e:
-                # If this fails, the token is invalid or the network is blocked (Render outbound issue).
-                logger.error(f"❌ FATAL ERROR: Failed to connect to Telegram API (Token/Network issue). Reason: {e}")
-                return # Stop execution if connection fails
-            # --- End Diagnostic Check ---
-
-            await application.start()
-            logger.info("✅ Bot is now polling for messages!")
-            
-            # Start polling for updates
-            await application.updater.start_polling(drop_pending_updates=True)
-            
-            # Keep running until stopped
-            while True:
-                await asyncio.sleep(1)
-                
+            await application.bot.set_webhook(url=full_webhook_url, drop_pending_updates=True)
+            logger.info(f"✅ Webhook successfully set to: {full_webhook_url}")
         except Exception as e:
-            logger.error(f"Error in bot polling: {e}")
-        finally:
-            # Graceful shutdown
-            if application:
-                try:
-                    await application.updater.stop()
-                    logger.info("Stopped polling for updates")
-                except Exception:
-                    pass
-                try:
-                    await application.stop()
-                    logger.info("Bot application stopped")
-                except Exception:
-                    pass
-    else:
-        logger.warning("Bot polling not started - TELEGRAM_BOT_TOKEN not configured.")
-        logger.info("Server is running in web-only mode. Privacy policy is available at /privacy")
+            logger.error(f"❌ FATAL ERROR: Failed to set Webhook. Check BOT_TOKEN and WEBHOOK_BASE_URL. Reason: {e}")
+            # If webhook fails, we cannot proceed, but we continue to run FastAPI for diagnostics.
 
-
-async def run_fastapi_server():
-    """Run the FastAPI server."""
+    # 3. Start the FastAPI Uvicorn Server
     import uvicorn
-    # Use the application object from the FastAPI global scope
     config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info")
     server = uvicorn.Server(config)
     await server.serve()
-
-
+    
 async def main():
-    """Run both FastAPI server and bot polling concurrently."""
+    """Main entry point."""
+    logger.info(f"Starting VidXpress Bot Application in WEBHOOK Mode on port {PORT}")
     
-    logger.info(f"Starting VidXpress Bot Application on port {PORT}")
-    logger.info(f"Mode: {'Polling' if BOT_TOKEN else 'Web-only'}")
+    # Run the setup and server
+    await set_webhook_and_start_fastapi()
     
-    # Run both tasks concurrently
-    tasks = [run_fastapi_server()]
-    
-    if BOT_TOKEN:
-        tasks.append(run_bot_polling())
-    
-    await asyncio.gather(*tasks)
-
 
 if __name__ == "__main__":
     try:
