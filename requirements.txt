@@ -4,3 +4,9 @@ python-telegram-bot
 yt-dlp
 httpx
 js2py
+fastapi
+httpx
+python-telegram-bot
+telegram
+uvicorn
+yt-dlp
