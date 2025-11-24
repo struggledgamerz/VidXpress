@@ -2,6 +2,7 @@ import os
 import tempfile
 import logging
 import shutil
+import asyncio # Add asyncio for main function and to_thread
 from typing import Dict, Any, Union
 
 from fastapi import FastAPI, Request
@@ -16,22 +17,16 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 import yt_dlp
-# Note: js2py dependency is now included in requirements.txt to provide the JS runtime.
 
 # --- Configuration ---
-# Set the port Uvicorn/FastAPI will listen on (Replit uses port 5000 for webview)
+# Set the port Uvicorn/FastAPI will listen on 
 PORT = int(os.environ.get('PORT', 5000)) 
 # Your Bot Token goes here
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 
-# Public URL of the deployed service - uses Replit's REPL_SLUG and REPL_OWNER for auto-detection
-# or falls back to WEBHOOK_BASE_URL environment variable
-REPL_SLUG = os.environ.get('REPL_SLUG', '')
-REPL_OWNER = os.environ.get('REPL_OWNER', '')
-if REPL_SLUG and REPL_OWNER:
-    WEBHOOK_URL = f'https://{REPL_SLUG}.{REPL_OWNER}.repl.co'
-else:
-    WEBHOOK_URL = os.environ.get('WEBHOOK_BASE_URL', '') 
+# Public URL of the deployed service (This MUST be set as an environment variable, 
+# e.g., on Render or any other service. Example: https://my-vidxpress-bot.onrender.com)
+WEBHOOK_URL = os.environ.get('WEBHOOK_BASE_URL', '') 
 
 # Define the path for the privacy policy URL. 
 PRIVACY_POLICY_PATH = "/privacy"
@@ -43,7 +38,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Maximum file size for Telegram bot API upload in bytes (50 MB limit applied to avoid timeouts)
+# Maximum file size for Telegram bot API upload in bytes (50 MB limit)
 MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024 
 
 # --- Static Privacy Policy Content (for the web endpoint) ---
@@ -128,6 +123,7 @@ class DownloadManager:
         """
         Attempts to download the video from the given URL.
         Returns a dict containing the status and resulting file path or error message.
+        NOTE: This is a SYNCHRONOUS function and MUST be run in a thread (via asyncio.to_thread).
         """
         temp_dir = tempfile.mkdtemp()
         download_info = {
@@ -153,8 +149,6 @@ class DownloadManager:
             'noprogress': True,
             'logger': self.logger,
             'allow_unplayable_formats': True,
-            # Removed conflicting 'extractor_args' now that js2py is installed. 
-            # We rely on js2py to handle JavaScript decryption.
         }
 
         self.logger.info(f"Created temporary directory: {temp_dir}")
@@ -244,7 +238,10 @@ class TelegramBot:
         # 2. Start download
         download_result = {'temp_dir': None}
         try:
-            download_result = self.download_manager.download(url)
+            # --- CRITICAL STABILITY FIX: Running blocking I/O in a separate thread ---
+            # This is essential for system health. It prevents the entire web server from hanging 
+            # while waiting for a single long download to finish.
+            download_result = await asyncio.to_thread(self.download_manager.download, url)
             temp_dir = download_result['temp_dir']
             
             # 3. Handle download failure
@@ -274,6 +271,10 @@ class TelegramBot:
             await processing_message.delete()
             
             # 4b. Send the file 
+            # Check if file_path exists before trying to open it
+            if not os.path.exists(file_path):
+                 raise FileNotFoundError(f"Downloaded file not found at path: {file_path}")
+
             await update.message.reply_video(
                 video=open(file_path, 'rb'),
                 caption=f"✅ Downloaded successfully!",
@@ -343,7 +344,6 @@ async def run_bot_polling():
             await application.updater.start_polling(drop_pending_updates=True)
             
             # Keep running until stopped
-            import asyncio
             while True:
                 await asyncio.sleep(1)
                 
@@ -370,6 +370,7 @@ async def run_bot_polling():
 async def run_fastapi_server():
     """Run the FastAPI server."""
     import uvicorn
+    # Use the application object from the FastAPI global scope
     config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info")
     server = uvicorn.Server(config)
     await server.serve()
@@ -377,7 +378,6 @@ async def run_fastapi_server():
 
 async def main():
     """Run both FastAPI server and bot polling concurrently."""
-    import asyncio
     
     logger.info(f"Starting VidXpress Bot Application on port {PORT}")
     logger.info(f"Mode: {'Polling' if BOT_TOKEN else 'Web-only'}")
@@ -392,8 +392,8 @@ async def main():
 
 
 if __name__ == "__main__":
-    import asyncio
     try:
+        # Use asyncio.run(main()) to start the whole application
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Shutting down gracefully...")
