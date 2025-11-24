@@ -19,13 +19,19 @@ import yt_dlp
 # Note: js2py dependency is now included in requirements.txt to provide the JS runtime.
 
 # --- Configuration ---
-# Set the port Uvicorn/FastAPI will listen on (Render default is 10000)
-PORT = int(os.environ.get('PORT', 10000)) 
+# Set the port Uvicorn/FastAPI will listen on (Replit uses port 5000 for webview)
+PORT = int(os.environ.get('PORT', 5000)) 
 # Your Bot Token goes here
-BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY') # Replace with your actual token in the deployment environment
+BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 
-# Public URL of the deployed service (e.g., https://your-service-name.onrender.com)
-WEBHOOK_URL = os.environ.get('WEBHOOK_BASE_URL', 'https://ff-like-bot-px1w.onrender.com') 
+# Public URL of the deployed service - uses Replit's REPL_SLUG and REPL_OWNER for auto-detection
+# or falls back to WEBHOOK_BASE_URL environment variable
+REPL_SLUG = os.environ.get('REPL_SLUG', '')
+REPL_OWNER = os.environ.get('REPL_OWNER', '')
+if REPL_SLUG and REPL_OWNER:
+    WEBHOOK_URL = f'https://{REPL_SLUG}.{REPL_OWNER}.repl.co'
+else:
+    WEBHOOK_URL = os.environ.get('WEBHOOK_BASE_URL', '') 
 
 # Define the path for the privacy policy URL. 
 PRIVACY_POLICY_PATH = "/privacy"
@@ -297,10 +303,27 @@ class TelegramBot:
 # --- FastAPI Setup for Webhook ---
 
 app = FastAPI()
-bot = TelegramBot(token=BOT_TOKEN)
-application = bot.app 
 
-# PUBLIC WEB ENDPOINT FOR PRIVACY POLICY
+# Only initialize bot if token is provided
+if BOT_TOKEN:
+    bot = TelegramBot(token=BOT_TOKEN)
+    application = bot.app
+else:
+    # Create a dummy application if no token provided
+    application = None
+    logger.warning("Bot not initialized - TELEGRAM_BOT_TOKEN not set") 
+
+# PUBLIC WEB ENDPOINTS
+@app.get("/")
+async def root():
+    """Root endpoint to verify the service is running."""
+    return {
+        "message": "VidXpress Telegram Bot is running!",
+        "status": "active",
+        "privacy_policy": f"{PRIVACY_POLICY_PATH}",
+        "webhook_configured": bool(WEBHOOK_URL and BOT_TOKEN)
+    }
+
 @app.get(PRIVACY_POLICY_PATH, response_class=HTMLResponse)
 async def get_privacy_policy():
     """Serves the privacy policy as a public HTML page."""
@@ -310,32 +333,44 @@ async def get_privacy_policy():
 @app.on_event("startup")
 async def startup_event():
     """Initialize PTB application and set the webhook on startup."""
-    if WEBHOOK_URL and BOT_TOKEN != 'YOUR_BOT_TOKEN':
-        # FIX: Explicitly initialize and start the PTB application for webhook readiness
-        await application.initialize()
-        
-        # Set the webhook
-        webhook_url = f"{WEBHOOK_URL}/webhook"
-        logger.info(f"Setting webhook to {webhook_url}")
-        await application.bot.set_webhook(url=webhook_url)
+    if application and WEBHOOK_URL and BOT_TOKEN:
+        try:
+            # FIX: Explicitly initialize and start the PTB application for webhook readiness
+            await application.initialize()
+            
+            # Set the webhook
+            webhook_url = f"{WEBHOOK_URL}/webhook"
+            logger.info(f"Setting webhook to {webhook_url}")
+            await application.bot.set_webhook(url=webhook_url)
 
-        # Start the application instance (required for process_update to work)
-        await application.start()
+            # Start the application instance (required for process_update to work)
+            await application.start()
+            logger.info("Bot webhook configured successfully!")
+        except Exception as e:
+            logger.error(f"Failed to configure webhook: {e}")
+            logger.warning("Bot will run in development mode without webhook until TELEGRAM_BOT_TOKEN is provided.")
     else:
-        logger.error("BOT_TOKEN or WEBHOOK_URL not configured. Cannot set webhook.")
+        logger.warning("BOT_TOKEN or WEBHOOK_URL not configured. Set TELEGRAM_BOT_TOKEN environment variable to enable the bot.")
+        logger.info("Server is running in web-only mode. Privacy policy is available at /privacy")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Stop the PTB application on shutdown."""
-    if WEBHOOK_URL and BOT_TOKEN != 'YOUR_BOT_TOKEN':
-        # Cleanly stop the application on service shutdown
-        await application.stop()
+    if application and WEBHOOK_URL and BOT_TOKEN:
+        try:
+            # Cleanly stop the application on service shutdown
+            await application.stop()
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
 
 
 @app.post("/webhook")
 async def webhook(request: Request):
     """Handle incoming Telegram updates."""
+    if not application:
+        return {"message": "Bot not configured"}
+    
     try:
         data = await request.json()
         update = Update.de_json(data, application.bot)
@@ -353,4 +388,5 @@ async def webhook(request: Request):
 if __name__ == "__main__":
     import uvicorn
     logger.info(f"Starting FastAPI on port {PORT}")
-    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)
+    logger.info(f"Webhook URL: {WEBHOOK_URL}")
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
