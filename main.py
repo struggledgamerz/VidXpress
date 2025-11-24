@@ -29,6 +29,8 @@ BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 # Public URL of the deployed service (e.g., https://ff-like-bot-px1w.onrender.com)
 # THIS MUST BE SET IN RENDER ENVIRONMENT VARIABLES
 WEBHOOK_URL = os.environ.get('WEBHOOK_BASE_URL', '') 
+# NEW: Environment variable to hold Netscape format cookies content for yt-dlp authentication
+YOUTUBE_COOKIES = os.environ.get('YOUTUBE_COOKIES', '')
 
 # Define the path for the webhook and privacy policy URL. 
 WEBHOOK_PATH = f"/{BOT_TOKEN}" if BOT_TOKEN else "/webhook"
@@ -153,19 +155,36 @@ class DownloadManager:
             'noprogress': True,
             'logger': self.logger,
             'allow_unplayable_formats': True,
+            # FIX 1: Add extractor-args to silence the JS runtime warning
+            'extractor_args': ['youtube:player_client=default']
         }
 
+        # --- NEW: Add cookie support for restricted videos ---
+        if YOUTUBE_COOKIES:
+            try:
+                cookie_file_path = os.path.join(temp_dir, 'cookies.txt')
+                # IMPORTANT: Write the cookies content to the temporary file
+                with open(cookie_file_path, 'w', encoding='utf-8') as f:
+                    f.write(YOUTUBE_COOKIES)
+                ydl_opts['cookiefile'] = cookie_file_path
+                self.logger.info("Authentication (cookies) enabled for yt-dlp and loaded into temp file.")
+            except Exception as e:
+                self.logger.error(f"Error creating cookie file: {e}")
+                
         self.logger.info(f"Created temporary directory: {temp_dir}")
         self.logger.info("Attempt 1: Trying simple MP4 format priority.")
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                # Use --cookies argument directly if possible (though cookiefile is standard)
+                # Ensure the cookies file path is correctly passed to the tool
                 info_dict = ydl.extract_info(url, download=True)
                 downloaded_files = []
                 if 'requested_downloads' in info_dict:
                     downloaded_files = [f['filepath'] for f in info_dict['requested_downloads'] if os.path.exists(f['filepath'])]
                 
                 if not downloaded_files and os.listdir(temp_dir):
+                    # Check the temp directory for the downloaded file based on the ID
                     for filename in os.listdir(temp_dir):
                         if filename.startswith(info_dict.get('id', '')):
                             downloaded_files.append(os.path.join(temp_dir, filename))
@@ -226,8 +245,16 @@ class TelegramBot:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Sends a welcome message on /start."""
         policy_url = f"{WEBHOOK_URL}{PRIVACY_POLICY_PATH}"
-        await update.message.reply_text(f'Hello! Send me a link to a video from Facebook, YouTube, or other supported sites, and I will try to download and send it to you. \n\n⚠️ **Note:** Videos over 50MB may fail due to upload size/time limits. The official [Privacy Policy]({policy_url}) is available here.', 
-                                        parse_mode=ParseMode.MARKDOWN)
+        # FIX 2: Check for the presence of cookies in the environment variable
+        cookie_status = "✅ On (Cookies Loaded)" if YOUTUBE_COOKIES else "❌ Off (Set YOUTUBE_COOKIES variable)"
+        
+        # Welcoming message updated to show cookie status
+        await update.message.reply_text(
+            f'Hello! Send me a link to a video from Facebook, YouTube, or other supported sites, and I will try to download and send it to you. \n\n'
+            f'🍪 **Authentication Status:** {cookie_status}. (Agar aapne cookies add ki hain, toh age-restricted videos bhi download ho sakti hain.)\n\n'
+            f'⚠️ **Note:** Videos over 50MB may fail due to upload size/time limits. The official [Privacy Policy]({policy_url}) is available here.', 
+            parse_mode=ParseMode.MARKDOWN
+        )
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handles text messages containing a URL."""
@@ -249,9 +276,10 @@ class TelegramBot:
                 # Provide a more specific error message for common YouTube issues
                 youtube_hint = ""
                 if "Sign in to confirm" in error or "cookies" in error:
-                    youtube_hint = "\n\n**🛑 UNABLE TO ACCESS (SIGN-IN REQUIRED):** This video is age-restricted, private, or requires authentication (cookies). The bot cannot log in to YouTube, making this video permanently inaccessible."
-                elif "JavaScript runtime" in error:
-                    youtube_hint = "\n\n**Possible Cause:** The video uses a highly complex format requiring a full JavaScript runtime to decrypt."
+                    cookie_fix = "Kripya apne deployment settings mein `YOUTUBE_COOKIES` environment variable set karein ya check karein ki woh expire toh nahi ho gayi." if not YOUTUBE_COOKIES else "Aapki cookies shayad expired ya invalid hain."
+                    youtube_hint = f"\n\n**🛑 UNABLE TO ACCESS (SIGN-IN REQUIRED):** Yeh video age-restricted, private, ya authentication (cookies) maang raha hai. {cookie_fix}"
+                elif "JavaScript runtime" in error or "No supported JavaScript runtime could be found" in error:
+                    youtube_hint = "\n\n**Possible Cause:** The video extraction failed due to complexity (This warning should be fixed in the new code)."
                 
                 await context.bot.edit_message_text(
                     chat_id=update.effective_chat.id, 
@@ -309,6 +337,11 @@ async def lifespan(app: FastAPI):
     if BOT_TOKEN and WEBHOOK_URL:
         # --- Startup ---
         logger.info("Starting up Telegram Application...")
+        
+        # Log cookie status on startup for confirmation
+        cookie_status_log = "ENABLED (Content Found)" if YOUTUBE_COOKIES else "DISABLED (No YOUTUBE_COOKIES variable found)"
+        logger.info(f"Cookie Status Check: {cookie_status_log}")
+        
         bot_instance = TelegramBot(token=BOT_TOKEN)
         application = bot_instance.app
         
@@ -378,6 +411,7 @@ async def root():
         "mode": "WEBHOOK",
         "configured_webhook_url": full_webhook_url,
         "privacy_policy_path": f"{PRIVACY_POLICY_PATH}",
+        "youtube_cookie_status": "Enabled" if YOUTUBE_COOKIES else "Disabled (Add YOUTUBE_COOKIES environment variable to enable restricted video downloads)"
     }
 
 @app.get(PRIVACY_POLICY_PATH, response_class=HTMLResponse)
