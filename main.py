@@ -349,8 +349,9 @@ app = FastAPI(lifespan=lifespan)
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
     """Receives updates from Telegram via webhook."""
-    if not application or not application.started:
-        logger.error("Webhook received but application is not initialized or started.")
+    # FIX: Check only if application is set (not None), since the 'started' attribute is invalid.
+    if not application:
+        logger.error("Webhook received but application object is None (not initialized).")
         # Return 200 OK so Telegram doesn't keep retrying, but log the error
         return {"status": "error", "message": "Bot not ready."}
         
