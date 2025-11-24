@@ -337,6 +337,17 @@ async def run_bot_polling():
         try:
             logger.info("Starting Telegram bot in polling mode...")
             await application.initialize()
+            
+            # --- Diagnostic Check: Verify token and connectivity before starting polling ---
+            try:
+                bot_info = await application.bot.get_me()
+                logger.info(f"Connected to Telegram API successfully. Bot username: @{bot_info.username}")
+            except Exception as e:
+                # If this fails, the token is invalid or the network is blocked (Render outbound issue).
+                logger.error(f"❌ FATAL ERROR: Failed to connect to Telegram API (Token/Network issue). Reason: {e}")
+                return # Stop execution if connection fails
+            # --- End Diagnostic Check ---
+
             await application.start()
             logger.info("✅ Bot is now polling for messages!")
             
