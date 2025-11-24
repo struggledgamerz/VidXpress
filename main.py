@@ -155,11 +155,10 @@ class DownloadManager:
             'noprogress': True,
             'logger': self.logger,
             'allow_unplayable_formats': True,
-            # FIX 1: Add extractor-args to silence the JS runtime warning
             'extractor_args': ['youtube:player_client=default']
         }
 
-        # --- NEW: Add cookie support for restricted videos ---
+        # --- Add cookie support for restricted videos ---
         if YOUTUBE_COOKIES:
             try:
                 cookie_file_path = os.path.join(temp_dir, 'cookies.txt')
@@ -176,17 +175,27 @@ class DownloadManager:
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # Use --cookies argument directly if possible (though cookiefile is standard)
-                # Ensure the cookies file path is correctly passed to the tool
                 info_dict = ydl.extract_info(url, download=True)
+                
+                # --- CRITICAL FIX START: Handle list (playlist) output ---
+                if isinstance(info_dict, list):
+                    # We expect only one item since 'noplaylist' is True. 
+                    if info_dict:
+                        info_dict = info_dict[0]
+                    else:
+                        raise ValueError("yt-dlp returned an empty list, likely no videos found.")
+                # --- CRITICAL FIX END ---
+
                 downloaded_files = []
-                if 'requested_downloads' in info_dict:
+                # Check for the downloaded file path in the expected locations
+                if 'requested_downloads' in info_dict and isinstance(info_dict['requested_downloads'], list):
                     downloaded_files = [f['filepath'] for f in info_dict['requested_downloads'] if os.path.exists(f['filepath'])]
                 
+                # Fallback check on the temp directory for the file using its ID
                 if not downloaded_files and os.listdir(temp_dir):
-                    # Check the temp directory for the downloaded file based on the ID
+                    video_id = info_dict.get('id', '')
                     for filename in os.listdir(temp_dir):
-                        if filename.startswith(info_dict.get('id', '')):
+                        if filename.startswith(video_id):
                             downloaded_files.append(os.path.join(temp_dir, filename))
                             
                 if downloaded_files:
@@ -194,6 +203,10 @@ class DownloadManager:
                     download_info['success'] = True
                     self.logger.info(f"Attempt 1 successful. Downloaded file: {download_info['file_path']}")
                     return download_info
+                
+                # If we reached here, download was successful but file path couldn't be located.
+                download_info['error'] = "Download successful, but file path could not be located in temporary directory."
+                return download_info
 
 
         except Exception as e:
@@ -208,13 +221,25 @@ class DownloadManager:
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info_dict = ydl.extract_info(url, download=True)
+                    
+                    # --- CRITICAL FIX START: Handle list (playlist) output ---
+                    if isinstance(info_dict, list):
+                        if info_dict:
+                            info_dict = info_dict[0]
+                        else:
+                            raise ValueError("yt-dlp returned an empty list, likely no videos found.")
+                    # --- CRITICAL FIX END ---
+
                     downloaded_files = []
-                    if 'requested_downloads' in info_dict:
+                    # Check for the downloaded file path in the expected locations
+                    if 'requested_downloads' in info_dict and isinstance(info_dict['requested_downloads'], list):
                         downloaded_files = [f['filepath'] for f in info_dict['requested_downloads'] if os.path.exists(f['filepath'])]
                     
+                    # Fallback check on the temp directory for the file using its ID
                     if not downloaded_files and os.listdir(temp_dir):
+                        video_id = info_dict.get('id', '')
                         for filename in os.listdir(temp_dir):
-                            if filename.startswith(info_dict.get('id', '')):
+                            if filename.startswith(video_id):
                                 downloaded_files.append(os.path.join(temp_dir, filename))
                                 
                     if downloaded_files:
@@ -222,6 +247,10 @@ class DownloadManager:
                         download_info['success'] = True
                         self.logger.info(f"Attempt 2 successful. Downloaded file: {download_info['file_path']}")
                         return download_info
+
+                    # If we reached here, download was successful but file path couldn't be located.
+                    download_info['error'] = "Download successful, but file path could not be located in temporary directory (Attempt 2)."
+                    return download_info
                                 
             except Exception as e:
                 final_error = str(e)
@@ -229,6 +258,7 @@ class DownloadManager:
                 download_info['error'] = final_error
                 return download_info
 
+        # Catch-all return
         return download_info
 
 
@@ -276,11 +306,14 @@ class TelegramBot:
                 # Provide a more specific error message for common YouTube issues
                 youtube_hint = ""
                 if "Sign in to confirm" in error or "cookies" in error:
-                    cookie_fix = "Kripya apne deployment settings mein `YOUTUBE_COOKIES` environment variable set karein ya check karein ki woh expire toh nahi ho gayi." if not YOUTUBE_COOKIES else "Aapki cookies shayad expired ya invalid hain."
+                    cookie_fix = "Kripya apne deployment settings mein `YOUTUBE_COOKIES` environment variable set karein ya check karein ki woh expire toh nahi ho gayi." if not YOUTUBE_COOKIES else "Aapki cookies shayad expired ya invalid hain. Nayi cookies generate karke daaliye."
                     youtube_hint = f"\n\n**🛑 UNABLE TO ACCESS (SIGN-IN REQUIRED):** Yeh video age-restricted, private, ya authentication (cookies) maang raha hai. {cookie_fix}"
                 elif "JavaScript runtime" in error or "No supported JavaScript runtime could be found" in error:
                     youtube_hint = "\n\n**Possible Cause:** The video extraction failed due to complexity (This warning should be fixed in the new code)."
-                
+                elif "no attribute 'get'" in error:
+                    # Specific error handling for the 'list' object error
+                    youtube_hint = "\n\n**🛑 Processing Error:** Bot ko URL process karne mein internal error aaya (shayad yeh koi playlist ya non-video content hai)."
+
                 await context.bot.edit_message_text(
                     chat_id=update.effective_chat.id, 
                     message_id=processing_message.message_id,
@@ -401,20 +434,4 @@ async def telegram_webhook(request: Request):
         return {"status": "error", "message": str(e)}
 
 # PUBLIC WEB ENDPOINTS
-@app.get("/")
-async def root():
-    """Root endpoint to verify the service is running and provides diagnostic info."""
-    full_webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-    return {
-        "message": "VidXpress Telegram Bot is running!",
-        "status": "active",
-        "mode": "WEBHOOK",
-        "configured_webhook_url": full_webhook_url,
-        "privacy_policy_path": f"{PRIVACY_POLICY_PATH}",
-        "youtube_cookie_status": "Enabled" if YOUTUBE_COOKIES else "Disabled (Add YOUTUBE_COOKIES environment variable to enable restricted video downloads)"
-    }
-
-@app.get(PRIVACY_POLICY_PATH, response_class=HTMLResponse)
-async def get_privacy_policy():
-    """Serves the privacy policy as a public HTML page."""
-    return PRIVACY_POLICY_HTML
+@app.g
