@@ -2,7 +2,7 @@ import os
 import tempfile
 import logging
 import shutil
-import asyncio # Add asyncio for main function and to_thread
+import asyncio 
 from typing import Dict, Any, Union
 
 from fastapi import FastAPI, Request
@@ -24,8 +24,7 @@ PORT = int(os.environ.get('PORT', 5000))
 # Your Bot Token goes here
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 
-# Public URL of the deployed service (This MUST be set as an environment variable, 
-# e.g., on Render or any other service. Example: https://my-vidxpress-bot.onrender.com)
+# Public URL of the deployed service (e.g., https://my-vidxpress-bot.onrender.com)
 WEBHOOK_URL = os.environ.get('WEBHOOK_BASE_URL', '') 
 
 # Define the path for the privacy policy URL. 
@@ -239,8 +238,6 @@ class TelegramBot:
         download_result = {'temp_dir': None}
         try:
             # --- CRITICAL STABILITY FIX: Running blocking I/O in a separate thread ---
-            # This is essential for system health. It prevents the entire web server from hanging 
-            # while waiting for a single long download to finish.
             download_result = await asyncio.to_thread(self.download_manager.download, url)
             temp_dir = download_result['temp_dir']
             
@@ -305,13 +302,16 @@ class TelegramBot:
 
 app = FastAPI()
 
+# Global application object (initial placeholder)
+application = None
+
 # Only initialize bot if token is provided
 if BOT_TOKEN:
     bot = TelegramBot(token=BOT_TOKEN)
     application = bot.app
+    # New log check added here to confirm application initialization
+    logger.info("Telegram Application object successfully created.")
 else:
-    # Create a dummy application if no token provided
-    application = None
     logger.warning("Bot not initialized - TELEGRAM_BOT_TOKEN not set") 
 
 # PUBLIC WEB ENDPOINTS
