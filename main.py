@@ -4,7 +4,7 @@ import logging
 import shutil
 import asyncio 
 import time
-from typing import Dict, Any, Union
+from typing import Dict, Any, Union, List
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -127,9 +127,26 @@ class DownloadManager:
     def __init__(self):
         self.logger = logging.getLogger('DownloadManager')
 
-    def download(self, url: str) -> Dict[str, Union[str, bool]]:
+    def _get_file_path(self, info_dict: Dict[str, Any], temp_dir: str) -> Union[str, None]:
+        """Tries to find the downloaded file path from the info_dict or temp_dir."""
+        # 1. Check for the downloaded file path in the expected locations
+        if 'requested_downloads' in info_dict and isinstance(info_dict['requested_downloads'], list):
+            downloaded_files = [f['filepath'] for f in info_dict['requested_downloads'] if os.path.exists(f['filepath'])]
+            if downloaded_files:
+                return downloaded_files[0]
+        
+        # 2. Fallback check on the temp directory for the file using its ID
+        if os.listdir(temp_dir):
+            video_id = info_dict.get('id', '')
+            for filename in os.listdir(temp_dir):
+                if filename.startswith(video_id) and os.path.isfile(os.path.join(temp_dir, filename)):
+                    return os.path.join(temp_dir, filename)
+        
+        return None
+
+    def download(self, url: str) -> Dict[str, Union[str, bool, None]]:
         """
-        Attempts to download the video from the given URL.
+        Attempts to download the video from the given URL using two different client configurations.
         Returns a dict containing the status and resulting file path or error message.
         NOTE: This is a SYNCHRONOUS function and MUST be run in a thread (via asyncio.to_thread).
         """
@@ -141,131 +158,105 @@ class DownloadManager:
             'temp_dir': temp_dir
         }
         
-        # Use a short template based on the video ID within the temp directory.
         output_template = os.path.join(temp_dir, '%(id)s.%(ext)s')
 
-        # yt-dlp options (Attempt 1: Simple MP4 priority)
-        # Added 'allow_unplayable_formats' and 'external_downloader_args' to force JS runtime use
-        ydl_opts = {
+        # Base yt-dlp options
+        ydl_opts_base = {
             'outtmpl': output_template,
             'max_filesize': MAX_FILE_SIZE_BYTES, 
-            'format': 'best[ext=mp4]/best', 
             'noplaylist': True,
             'quiet': True,
             'verbose': False,
             'noprogress': True,
             'logger': self.logger,
-            'extractor_args': {"youtube": {"player_client": ["web"]}},
-            # --- FIX for Signature Solving / JavaScript Runtime ---
-            'allow_unplayable_formats': True,
-            # Force the use of js2py which is available in the environment
-            'external_downloader_args': {'youtube_dl': ['--no-check-certificates']}, 
-            # --- END FIX ---
+            # No need for js2py specific args, as yt-dlp attempts to use it internally if required and available
         }
-            
 
-        # --- Add cookie support for restricted videos ---
+        # --- Attempt 1: Standard client, preferred format (merging streams) ---
+        ydl_opts_1 = ydl_opts_base.copy()
+        ydl_opts_1.update({
+            # Prioritize merging separate mp4 video/m4a audio streams, then single best mp4, then absolute best.
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 
+            # Standard web client - known to sometimes fail due to SABR/signature issues
+            'extractor_args': {"youtube": {"player_client": ["web"]}}, 
+        })
+
+        # --- Attempt 2: Mobile web client, preferred format (Fallback) ---
+        ydl_opts_2 = ydl_opts_base.copy()
+        ydl_opts_2.update({
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 
+            # Mobile web client - often more stable for signature solving
+            'extractor_args': {"youtube": {"player_client": ["mweb"]}}, 
+        })
+        
+        # List of attempts to process
+        attempts = [
+            {'name': 'Standard Client (web)', 'options': ydl_opts_1},
+            {'name': 'Mobile Client (mweb) Fallback', 'options': ydl_opts_2}
+        ]
+
+        # --- Cookie File Setup (Applied to both attempts) ---
+        cookie_file_path = None
         if YOUTUBE_COOKIES:
             try:
                 cookie_file_path = os.path.join(temp_dir, 'cookies.txt')
-                # IMPORTANT: Write the cookies content to the temporary file
                 with open(cookie_file_path, 'w', encoding='utf-8') as f:
                     f.write(YOUTUBE_COOKIES)
-                ydl_opts['cookiefile'] = cookie_file_path
                 self.logger.info("Authentication (cookies) enabled for yt-dlp and loaded into temp file.")
             except Exception as e:
                 self.logger.error(f"Error creating cookie file: {e}")
-                
+
         self.logger.info(f"Created temporary directory: {temp_dir}")
-        self.logger.info("Attempt 1: Trying simple MP4 format priority with JSRuntime support.")
 
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info_dict = ydl.extract_info(url, download=True)
-                
-                # --- CRITICAL FIX: Handle list (playlist) output ---
-                # FIX: yt-dlp sometimes returns list instead of dict
-                if isinstance(info_dict, list):
-                    try:
-                        info_dict = next(item for item in info_dict if isinstance(item, dict))
-                    except StopIteration:
-                        raise ValueError("No valid video data found (list contained no dict).")
-                # --- CRITICAL FIX END ---
-
-                downloaded_files = []
-                # Check for the downloaded file path in the expected locations
-                if 'requested_downloads' in info_dict and isinstance(info_dict['requested_downloads'], list):
-                    downloaded_files = [f['filepath'] for f in info_dict['requested_downloads'] if os.path.exists(f['filepath'])]
-                
-                # Fallback check on the temp directory for the file using its ID
-                if not downloaded_files and os.listdir(temp_dir):
-                    video_id = info_dict.get('id', '')
-                    for filename in os.listdir(temp_dir):
-                        if filename.startswith(video_id):
-                            downloaded_files.append(os.path.join(temp_dir, filename))
-                            
-                if downloaded_files:
-                    download_info['file_path'] = downloaded_files[0]
-                    download_info['success'] = True
-                    self.logger.info(f"Attempt 1 successful. Downloaded file: {download_info['file_path']}")
-                    return download_info
-                
-                # If we reached here, download was successful but file path couldn't be located.
-                download_info['error'] = "Download successful, but file path could not be located in temporary directory."
-                return download_info
-
-
-        except Exception as e:
-            error_message = str(e)
-            self.logger.warning(f"Attempt 1 failed. Reason: {error_message}")
-            download_info['error'] = error_message
+        for i, attempt in enumerate(attempts):
+            attempt_index = i + 1
+            ydl_opts = attempt['options']
             
-            # --- Attempt 2: Fallback (Absolute best quality/format) ---
-            self.logger.info("Attempt 2: Falling back to absolute best quality/format (JSRuntime support retained).")
-            ydl_opts.pop('format', None) # Remove explicit format filter
-            
+            if cookie_file_path:
+                ydl_opts['cookiefile'] = cookie_file_path
+
+            self.logger.info(f"Attempt {attempt_index}: Trying {attempt['name']} with format: {ydl_opts['format']}")
+
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info_dict = ydl.extract_info(url, download=True)
                     
-                    # FIX: yt-dlp sometimes returns list instead of dict
+                    # Ensure info_dict is a dictionary (handles playlist edge case)
                     if isinstance(info_dict, list):
-                        try:
-                            info_dict = next(item for item in info_dict if isinstance(item, dict))
-                        except StopIteration:
-                            raise ValueError("No valid video data found (list contained no dict).")
+                        info_dict = next((item for item in info_dict if isinstance(item, dict)), None)
+                        if not info_dict:
+                             raise ValueError("No valid video data found (list contained no dict).")
 
-                    # --- CRITICAL FIX END ---
-
-                    downloaded_files = []
-                    # Check for the downloaded file path in the expected locations
-                    if 'requested_downloads' in info_dict and isinstance(info_dict['requested_downloads'], list):
-                        downloaded_files = [f['filepath'] for f in info_dict['requested_downloads'] if os.path.exists(f['filepath'])]
-                    
-                    # Fallback check on the temp directory for the file using its ID
-                    if not downloaded_files and os.listdir(temp_dir):
-                        video_id = info_dict.get('id', '')
-                        for filename in os.listdir(temp_dir):
-                            if filename.startswith(video_id):
-                                downloaded_files.append(os.path.join(temp_dir, filename))
-                                
-                    if downloaded_files:
-                        download_info['file_path'] = downloaded_files[0]
+                    file_path = self._get_file_path(info_dict, temp_dir)
+                            
+                    if file_path:
+                        download_info['file_path'] = file_path
                         download_info['success'] = True
-                        self.logger.info(f"Attempt 2 successful. Downloaded file: {download_info['file_path']}")
+                        self.logger.info(f"Attempt {attempt_index} successful. Downloaded file: {download_info['file_path']}")
                         return download_info
+                    
+                    # If download finished but file path couldn't be located.
+                    raise RuntimeError("Download finished, but the final file path could not be located in the temporary directory.")
 
-                    # If we reached here, download was successful but file path could not be located.
-                    download_info['error'] = "Download successful, but file path could not be located in temporary directory (Attempt 2)."
-                    return download_info
-                                
+
             except Exception as e:
-                final_error = str(e)
-                self.logger.error(f"Attempt 2 failed. Final failure reason: {final_error}")
-                download_info['error'] = final_error
-                return download_info
-
-        # Catch-all return
+                error_message = str(e)
+                self.logger.warning(f"Attempt {attempt_index} failed. Reason: {error_message}")
+                download_info['error'] = error_message
+                
+                # If it was the last attempt, break and return the failure
+                if attempt_index == len(attempts):
+                    break
+                
+                # Clean up temp files from failed download before next attempt
+                # The temp_dir itself is kept for the next attempt/cleanup
+                if os.listdir(temp_dir):
+                    for filename in os.listdir(temp_dir):
+                        file_to_delete = os.path.join(temp_dir, filename)
+                        if os.path.isfile(file_to_delete) and file_to_delete != cookie_file_path:
+                            os.remove(file_to_delete)
+        
+        # Final failure return
         return download_info
 
 
@@ -313,8 +304,8 @@ class TelegramBot:
                 if "Sign in to confirm" in error or "cookies" in error:
                     cookie_fix = "Kripya apne deployment settings mein `YOUTUBE_COOKIES` environment variable set karein ya check karein ki woh expire toh nahi ho gayi." if not YOUTUBE_COOKIES else "Aapki cookies shayad expired ya invalid hain. Nayi cookies generate karke daaliye."
                     youtube_hint = f"\n\n**🛑 UNABLE TO ACCESS (SIGN-IN REQUIRED):** Yeh video age-restricted, private, ya authentication (cookies) maang raha hai. {cookie_fix}"
-                elif "Signature solving failed" in error or "No supported JavaScript runtime could be found" in error:
-                    youtube_hint = "\n\n**🛑 JAVASCRIPT RUNTIME FAILED:** Bot ko video signature solve karne mein dikkat aayi. Yeh aam taur par tab hota hai jab YouTube security update karta hai. Please try again later ya bot maintainer se contact karein."
+                elif "Signature solving failed" in error or "Requested format is not available" in error:
+                    youtube_hint = "\n\n**🛑 DOWNLOAD FORMAT ERROR:** Bot ko video signature solve karne ya compatible download format dhoondhne mein dikkat aayi. Yeh aam taur par tab hota hai jab YouTube security update karta hai."
                 elif "no attribute 'get'" in error:
                     # Specific error handling for the 'list' object error
                     youtube_hint = "\n\n**🛑 PROCESSING ERROR:** Bot ko URL process karne mein internal error aaya (shayad yeh koi playlist ya non-video content hai)."
