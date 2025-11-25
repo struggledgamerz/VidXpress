@@ -435,4 +435,5 @@ async def telegram_webhook(request: Request):
 # PUBLIC WEB ENDPOINTS
 @app.get("/")
 async def root():
+    return {"status": "ok"}
   
