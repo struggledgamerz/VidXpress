@@ -154,9 +154,8 @@ class DownloadManager:
             'verbose': False,
             'noprogress': True,
             'logger': self.logger,
-            'allow_unplayable_formats': True,
-            'extractor_args': ['youtube:player_client=default']
-        }
+            'extractor_args': {"youtube": {"player_client": ["web"]}}
+            
 
         # --- Add cookie support for restricted videos ---
         if YOUTUBE_COOKIES:
@@ -178,14 +177,13 @@ class DownloadManager:
                 info_dict = ydl.extract_info(url, download=True)
                 
                 # --- CRITICAL FIX: Handle list (playlist) output ---
-                if isinstance(info_dict, list):
-                    # We expect only one item since 'noplaylist' is True. 
-                    if info_dict:
-                        info_dict = info_dict[0]
-                    else:
-                        # Handles the specific error 'list' object has no attribute 'get' 
-                        # if the list was unexpectedly empty.
-                        raise ValueError("yt-dlp returned an empty list, likely no videos found.")
+                # FIX: yt-dlp sometimes returns list instead of dict
+if isinstance(info_dict, list):
+    try:
+        info_dict = next(item for item in info_dict if isinstance(item, dict))
+    except StopIteration:
+        raise ValueError("No valid video data found (list contained no dict).")
+
                 # --- CRITICAL FIX END ---
 
                 downloaded_files = []
@@ -224,12 +222,13 @@ class DownloadManager:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info_dict = ydl.extract_info(url, download=True)
                     
-                    # --- CRITICAL FIX: Handle list (playlist) output ---
-                    if isinstance(info_dict, list):
-                        if info_dict:
-                            info_dict = info_dict[0]
-                        else:
-                            raise ValueError("yt-dlp returned an empty list, likely no videos found.")
+                    # FIX: yt-dlp sometimes returns list instead of dict
+if isinstance(info_dict, list):
+    try:
+        info_dict = next(item for item in info_dict if isinstance(item, dict))
+    except StopIteration:
+        raise ValueError("No valid video data found (list contained no dict).")
+
                     # --- CRITICAL FIX END ---
 
                     downloaded_files = []
