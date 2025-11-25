@@ -169,7 +169,6 @@ class DownloadManager:
             'verbose': False,
             'noprogress': True,
             'logger': self.logger,
-            # No need for js2py specific args, as yt-dlp attempts to use it internally if required and available
         }
 
         # --- Attempt 1: Standard client, preferred format (merging streams) ---
@@ -181,18 +180,18 @@ class DownloadManager:
             'extractor_args': {"youtube": {"player_client": ["web"]}}, 
         })
 
-        # --- Attempt 2: Mobile web client, preferred format (Fallback) ---
+        # --- Attempt 2: Android client, preferred format (Fallback) ---
         ydl_opts_2 = ydl_opts_base.copy()
         ydl_opts_2.update({
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 
-            # Mobile web client - often more stable for signature solving
-            'extractor_args': {"youtube": {"player_client": ["mweb"]}}, 
+            # Switching from mweb (which requires PO Token) to android client
+            'extractor_args': {"youtube": {"player_client": ["android"]}}, 
         })
         
         # List of attempts to process
         attempts = [
             {'name': 'Standard Client (web)', 'options': ydl_opts_1},
-            {'name': 'Mobile Client (mweb) Fallback', 'options': ydl_opts_2}
+            {'name': 'Android Client (android) Fallback', 'options': ydl_opts_2} 
         ]
 
         # --- Cookie File Setup (Applied to both attempts) ---
@@ -253,6 +252,7 @@ class DownloadManager:
                 if os.listdir(temp_dir):
                     for filename in os.listdir(temp_dir):
                         file_to_delete = os.path.join(temp_dir, filename)
+                        # Ensure we don't delete the cookie file if it exists
                         if os.path.isfile(file_to_delete) and file_to_delete != cookie_file_path:
                             os.remove(file_to_delete)
         
