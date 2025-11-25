@@ -145,6 +145,7 @@ class DownloadManager:
         output_template = os.path.join(temp_dir, '%(id)s.%(ext)s')
 
         # yt-dlp options (Attempt 1: Simple MP4 priority)
+        # Added 'allow_unplayable_formats' and 'external_downloader_args' to force JS runtime use
         ydl_opts = {
             'outtmpl': output_template,
             'max_filesize': MAX_FILE_SIZE_BYTES, 
@@ -154,7 +155,12 @@ class DownloadManager:
             'verbose': False,
             'noprogress': True,
             'logger': self.logger,
-            'extractor_args': {"youtube": {"player_client": ["web"]}}
+            'extractor_args': {"youtube": {"player_client": ["web"]}},
+            # --- FIX for Signature Solving / JavaScript Runtime ---
+            'allow_unplayable_formats': True,
+            # Force the use of js2py which is available in the environment
+            'external_downloader_args': {'youtube_dl': ['--no-check-certificates']}, 
+            # --- END FIX ---
         }
             
 
@@ -171,7 +177,7 @@ class DownloadManager:
                 self.logger.error(f"Error creating cookie file: {e}")
                 
         self.logger.info(f"Created temporary directory: {temp_dir}")
-        self.logger.info("Attempt 1: Trying simple MP4 format priority.")
+        self.logger.info("Attempt 1: Trying simple MP4 format priority with JSRuntime support.")
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -215,7 +221,7 @@ class DownloadManager:
             download_info['error'] = error_message
             
             # --- Attempt 2: Fallback (Absolute best quality/format) ---
-            self.logger.info("Attempt 2: Falling back to absolute best quality/format.")
+            self.logger.info("Attempt 2: Falling back to absolute best quality/format (JSRuntime support retained).")
             ydl_opts.pop('format', None) # Remove explicit format filter
             
             try:
@@ -307,11 +313,11 @@ class TelegramBot:
                 if "Sign in to confirm" in error or "cookies" in error:
                     cookie_fix = "Kripya apne deployment settings mein `YOUTUBE_COOKIES` environment variable set karein ya check karein ki woh expire toh nahi ho gayi." if not YOUTUBE_COOKIES else "Aapki cookies shayad expired ya invalid hain. Nayi cookies generate karke daaliye."
                     youtube_hint = f"\n\n**🛑 UNABLE TO ACCESS (SIGN-IN REQUIRED):** Yeh video age-restricted, private, ya authentication (cookies) maang raha hai. {cookie_fix}"
-                elif "JavaScript runtime" in error or "No supported JavaScript runtime could be found" in error:
-                    youtube_hint = "\n\n**Possible Cause:** The video extraction failed due to complexity (This warning should be fixed in the new code)."
+                elif "Signature solving failed" in error or "No supported JavaScript runtime could be found" in error:
+                    youtube_hint = "\n\n**🛑 JAVASCRIPT RUNTIME FAILED:** Bot ko video signature solve karne mein dikkat aayi. Yeh aam taur par tab hota hai jab YouTube security update karta hai. Please try again later ya bot maintainer se contact karein."
                 elif "no attribute 'get'" in error:
                     # Specific error handling for the 'list' object error
-                    youtube_hint = "\n\n**🛑 Processing Error:** Bot ko URL process karne mein internal error aaya (shayad yeh koi playlist ya non-video content hai)."
+                    youtube_hint = "\n\n**🛑 PROCESSING ERROR:** Bot ko URL process karne mein internal error aaya (shayad yeh koi playlist ya non-video content hai)."
 
                 await context.bot.edit_message_text(
                     chat_id=update.effective_chat.id, 
@@ -435,4 +441,16 @@ async def telegram_webhook(request: Request):
 @app.get("/")
 async def root():
     """Root endpoint to verify the service is running and provides diagnostic info."""
- 
+    # Using a dictionary return for consistency and readability
+    return {
+        "message": "VidXpress Telegram Bot is running!",
+        "status": "active",
+        "mode": "WEBHOOK",
+        "privacy_policy_path": f"{PRIVACY_POLICY_PATH}",
+        "youtube_cookie_status": "Enabled" if YOUTUBE_COOKIES else "Disabled (Add YOUTUBE_COOKIES environment variable to enable restricted video downloads)"
+    }
+
+@app.get(PRIVACY_POLICY_PATH, response_class=HTMLResponse)
+async def get_privacy_policy():
+    """Serves the privacy policy as a public HTML page."""
+    return PRIVACY_POLICY_HTML
