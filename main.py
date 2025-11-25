@@ -177,12 +177,14 @@ class DownloadManager:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info_dict = ydl.extract_info(url, download=True)
                 
-                # --- CRITICAL FIX START: Handle list (playlist) output ---
+                # --- CRITICAL FIX: Handle list (playlist) output ---
                 if isinstance(info_dict, list):
                     # We expect only one item since 'noplaylist' is True. 
                     if info_dict:
                         info_dict = info_dict[0]
                     else:
+                        # Handles the specific error 'list' object has no attribute 'get' 
+                        # if the list was unexpectedly empty.
                         raise ValueError("yt-dlp returned an empty list, likely no videos found.")
                 # --- CRITICAL FIX END ---
 
@@ -222,7 +224,7 @@ class DownloadManager:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info_dict = ydl.extract_info(url, download=True)
                     
-                    # --- CRITICAL FIX START: Handle list (playlist) output ---
+                    # --- CRITICAL FIX: Handle list (playlist) output ---
                     if isinstance(info_dict, list):
                         if info_dict:
                             info_dict = info_dict[0]
@@ -429,9 +431,4 @@ async def telegram_webhook(request: Request):
         await application.process_update(update)
         
         return {"status": "ok"}
-    except Exception as e:
-        logger.error(f"Error processing update: {e}")
-        return {"status": "error", "message": str(e)}
-
-# PUBLIC WEB ENDPOINTS
-@app.g
+    except Exception as 
