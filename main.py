@@ -29,7 +29,7 @@ BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 # Public URL of the deployed service (e.g., https://ff-like-bot-px1w.onrender.com)
 # THIS MUST BE SET IN RENDER ENVIRONMENT VARIABLES
 WEBHOOK_URL = os.environ.get('WEBHOOK_BASE_URL', '') 
-# NEW: Environment variable to hold Netscape format cookies content for yt-dlp authentication
+# Environment variable to hold Netscape format cookies content for yt-dlp authentication
 YOUTUBE_COOKIES = os.environ.get('YOUTUBE_COOKIES', '')
 
 # Define the path for the webhook and privacy policy URL. 
@@ -277,10 +277,8 @@ class TelegramBot:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Sends a welcome message on /start."""
         policy_url = f"{WEBHOOK_URL}{PRIVACY_POLICY_PATH}"
-        # FIX 2: Check for the presence of cookies in the environment variable
         cookie_status = "✅ On (Cookies Loaded)" if YOUTUBE_COOKIES else "❌ Off (Set YOUTUBE_COOKIES variable)"
         
-        # Welcoming message updated to show cookie status
         await update.message.reply_text(
             f'Hello! Send me a link to a video from Facebook, YouTube, or other supported sites, and I will try to download and send it to you. \n\n'
             f'🍪 **Authentication Status:** {cookie_status}. (Agar aapne cookies add ki hain, toh age-restricted videos bhi download ho sakti hain.)\n\n'
@@ -298,7 +296,7 @@ class TelegramBot:
         # 2. Start download
         download_result = {'temp_dir': None}
         try:
-            # --- CRITICAL FIX: Running blocking I/O in a separate thread ---
+            # Running blocking I/O in a separate thread
             download_result = await asyncio.to_thread(self.download_manager.download, url)
             temp_dir = download_result['temp_dir']
             
@@ -344,7 +342,7 @@ class TelegramBot:
                 write_timeout=60
             )
 
-        except Exception as e:
+        except Exception as e: # Syntax fixed here
             self.logger.error(f"Failed to send file or encountered error in send_media_callback: {e}")
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id, 
@@ -417,7 +415,7 @@ app = FastAPI(lifespan=lifespan)
 @app.post(WEBHOOK_PATH)
 async def telegram_webhook(request: Request):
     """Receives updates from Telegram via webhook."""
-    # FIX: Check only if application is set (not None), since the 'started' attribute is invalid.
+    # Check only if application is set (not None), since the 'started' attribute is invalid.
     if not application:
         logger.error("Webhook received but application object is None (not initialized).")
         # Return 200 OK so Telegram doesn't keep retrying, but log the error
@@ -431,4 +429,10 @@ async def telegram_webhook(request: Request):
         await application.process_update(update)
         
         return {"status": "ok"}
-    except Exception as 
+    except Exception as e:
+        logger.error(f"Error processing update: {e}")
+        return {"status": "error", "message": str(e)}
+
+# PUBLIC WEB ENDPOINTS
+@app.get("/")
+            
