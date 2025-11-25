@@ -171,30 +171,30 @@ class DownloadManager:
             'logger': self.logger,
         }
 
-        # --- Attempt 1: Standard client, preferred format (merging streams) ---
+        # --- Attempt 1: Standard client (web) ---
         ydl_opts_1 = ydl_opts_base.copy()
         ydl_opts_1.update({
             # Prioritize merging separate mp4 video/m4a audio streams, then single best mp4, then absolute best.
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 
-            # Standard web client - known to sometimes fail due to SABR/signature issues
+            # Standard web client - first attempt
             'extractor_args': {"youtube": {"player_client": ["web"]}}, 
         })
 
-        # --- Attempt 2: Android client, preferred format (Fallback) ---
+        # --- Attempt 2: Web Public client (web_public) Fallback ---
         ydl_opts_2 = ydl_opts_base.copy()
         ydl_opts_2.update({
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 
-            # Switching from mweb (which requires PO Token) to android client
-            'extractor_args': {"youtube": {"player_client": ["android"]}}, 
+            # Switching to web_public as a robust alternative that accepts cookies
+            'extractor_args': {"youtube": {"player_client": ["web_public"]}}, 
         })
         
         # List of attempts to process
         attempts = [
             {'name': 'Standard Client (web)', 'options': ydl_opts_1},
-            {'name': 'Android Client (android) Fallback', 'options': ydl_opts_2} 
+            {'name': 'Web Public Client (web_public) Fallback', 'options': ydl_opts_2} 
         ]
 
-        # --- Cookie File Setup (Applied to both attempts) ---
+        # --- Cookie File Setup (Applied to all attempts) ---
         cookie_file_path = None
         if YOUTUBE_COOKIES:
             try:
