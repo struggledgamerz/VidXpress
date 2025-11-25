@@ -179,11 +179,11 @@ class DownloadManager:
                 
                 # --- CRITICAL FIX: Handle list (playlist) output ---
                 # FIX: yt-dlp sometimes returns list instead of dict
-if isinstance(info_dict, list):
-    try:
-        info_dict = next(item for item in info_dict if isinstance(item, dict))
-    except StopIteration:
-        raise ValueError("No valid video data found (list contained no dict).")
+                 if isinstance(info_dict, list):
+                  try:
+                       info_dict = next(item for item in info_dict if isinstance(item, dict))
+                       except StopIteration:
+                       raise ValueError("No valid video data found (list contained no dict).")
 
                 # --- CRITICAL FIX END ---
 
@@ -224,11 +224,11 @@ if isinstance(info_dict, list):
                     info_dict = ydl.extract_info(url, download=True)
                     
                     # FIX: yt-dlp sometimes returns list instead of dict
-if isinstance(info_dict, list):
-    try:
-        info_dict = next(item for item in info_dict if isinstance(item, dict))
-    except StopIteration:
-        raise ValueError("No valid video data found (list contained no dict).")
+                    if isinstance(info_dict, list):
+                      try:
+                           info_dict = next(item for item in info_dict if isinstance(item, dict))
+                            except StopIteration:
+                             raise ValueError("No valid video data found (list contained no dict).")
 
                     # --- CRITICAL FIX END ---
 
