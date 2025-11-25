@@ -155,6 +155,7 @@ class DownloadManager:
             'noprogress': True,
             'logger': self.logger,
             'extractor_args': {"youtube": {"player_client": ["web"]}}
+        }
             
 
         # --- Add cookie support for restricted videos ---
