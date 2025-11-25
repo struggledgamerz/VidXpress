@@ -250,7 +250,7 @@ class DownloadManager:
                         self.logger.info(f"Attempt 2 successful. Downloaded file: {download_info['file_path']}")
                         return download_info
 
-                    # If we reached here, download was successful but file path couldn't be located.
+                    # If we reached here, download was successful but file path could not be located.
                     download_info['error'] = "Download successful, but file path could not be located in temporary directory (Attempt 2)."
                     return download_info
                                 
@@ -342,7 +342,7 @@ class TelegramBot:
                 write_timeout=60
             )
 
-        except Exception as e: # Syntax fixed here
+        except Exception as e:
             self.logger.error(f"Failed to send file or encountered error in send_media_callback: {e}")
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id, 
@@ -350,7 +350,6 @@ class TelegramBot:
                 text=f"❌ An unexpected error occurred during upload: `{e}`. This usually means the file was too large and the connection timed out.",
                 parse_mode=ParseMode.MARKDOWN
             )
-
         finally:
             # 5. Cleanup temporary directory
             if 'temp_dir' in download_result and download_result['temp_dir'] and os.path.exists(download_result['temp_dir']):
@@ -435,4 +434,5 @@ async def telegram_webhook(request: Request):
 
 # PUBLIC WEB ENDPOINTS
 @app.get("/")
-            
+async def root():
+  
