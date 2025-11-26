@@ -277,7 +277,6 @@ class TelegramBot:
         
         await update.message.reply_text(
             f'Hello! Send me a link to a video from Facebook, YouTube, or other supported sites, and I will try to download and send it to you. \n\n'
-            f'🍪 **Authentication Status:** {cookie_status}. (Agar aapne cookies add ki hain, toh age-restricted videos bhi download ho sakti hain.)\n\n'
             f'⚠️ **Note:** Videos over 50MB may fail due to upload size/time limits. The official [Privacy Policy]({policy_url}) is available here.', 
             parse_mode=ParseMode.MARKDOWN
         )
