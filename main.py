@@ -24,11 +24,11 @@ import yt_dlp
 # Set the port Uvicorn/FastAPI will listen on 
 PORT = int(os.environ.get('PORT', 5000)) 
 # Your Bot Token goes here
-BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY')
 
 # Public URL of the deployed service (e.g., https://ff-like-bot-px1w.onrender.com)
 # THIS MUST BE SET IN RENDER ENVIRONMENT VARIABLES
-WEBHOOK_URL = os.environ.get('WEBHOOK_BASE_URL', '') 
+WEBHOOK_URL = os.environ.get('WEBHOOK_BASE_URL', 'https://ff-like-bot-px1w.onrender.com') 
 # Environment variable to hold Netscape format cookies content for yt-dlp authentication
 YOUTUBE_COOKIES = os.environ.get('YOUTUBE_COOKIES', '')
 
@@ -99,7 +99,7 @@ PRIVACY_POLICY_HTML = """
 <body>
     <div class="container">
         <h1>VidXpress⚡ - Privacy Policy</h1>
-        <p>This bot is designed solely to download and relay publicly accessible video content from external platforms (e.g., YouTube, Facebook).</p>
+        <p>This bot is designed solely to download and relay publicly accessible video content from external platforms (e.g., YouTube, Facebook, Twitter).</p>
 
         <h2>1. Data Collection and Processing</h2>
         <ul>
@@ -146,8 +146,7 @@ class DownloadManager:
 
     def download(self, url: str) -> Dict[str, Union[str, bool, None]]:
         """
-        Attempts to download the video from the given URL using two different client configurations.
-        Returns a dict containing the status and resulting file path or error message.
+        Attempts to download the video from the given URL.
         NOTE: This is a SYNCHRONOUS function and MUST be run in a thread (via asyncio.to_thread).
         """
         temp_dir = tempfile.mkdtemp()
@@ -160,7 +159,7 @@ class DownloadManager:
         
         output_template = os.path.join(temp_dir, '%(id)s.%(ext)s')
 
-        # Base yt-dlp options
+        # --- Base Options for Both Attempts ---
         ydl_opts_base = {
             'outtmpl': output_template,
             'max_filesize': MAX_FILE_SIZE_BYTES, 
@@ -171,50 +170,45 @@ class DownloadManager:
             'logger': self.logger,
         }
 
-        # --- Attempt 1: Standard client (web) ---
-        ydl_opts_1 = ydl_opts_base.copy()
-        ydl_opts_1.update({
-            # Prioritize merging separate mp4 video/m4a audio streams, then single best mp4, then absolute best.
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 
-            # Standard web client - first attempt
-            'extractor_args': {"youtube": {"player_client": ["web"]}}, 
-        })
-
-        # --- Attempt 2: Web Public client (web_public) Fallback ---
-        ydl_opts_2 = ydl_opts_base.copy()
-        ydl_opts_2.update({
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 
-            # Switching to web_public as a robust alternative that accepts cookies
-            'extractor_args': {"youtube": {"player_client": ["web_public"]}}, 
-        })
-        
-        # List of attempts to process
-        attempts = [
-            {'name': 'Standard Client (web)', 'options': ydl_opts_1},
-            {'name': 'Web Public Client (web_public) Fallback', 'options': ydl_opts_2} 
-        ]
-
-        # --- Cookie File Setup (Applied to all attempts) ---
+        # --- Cookie File Setup (Temporary file is created) ---
         cookie_file_path = None
         if YOUTUBE_COOKIES:
             try:
                 cookie_file_path = os.path.join(temp_dir, 'cookies.txt')
                 with open(cookie_file_path, 'w', encoding='utf-8') as f:
                     f.write(YOUTUBE_COOKIES)
+                ydl_opts_base['cookiefile'] = cookie_file_path
                 self.logger.info("Authentication (cookies) enabled for yt-dlp and loaded into temp file.")
             except Exception as e:
                 self.logger.error(f"Error creating cookie file: {e}")
-
+                
         self.logger.info(f"Created temporary directory: {temp_dir}")
+        
+        # --- List of Attempts ---
+        attempts = [
+            # Attempt 1: Standard client (web)
+            {
+                'name': 'Standard Client (web)', 
+                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                'extractor_args': {"youtube": {"player_client": ["web"]}}
+            },
+            # Attempt 2: Android Test client (Fallback)
+            {
+                'name': 'Android Test Client (android_test) Fallback', 
+                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 
+                'extractor_args': {"youtube": {"player_client": ["android_test"]}}
+            }
+        ]
 
         for i, attempt in enumerate(attempts):
             attempt_index = i + 1
-            ydl_opts = attempt['options']
+            ydl_opts = ydl_opts_base.copy()
+            ydl_opts.update({
+                'format': attempt['format'],
+                'extractor_args': attempt['extractor_args']
+            })
             
-            if cookie_file_path:
-                ydl_opts['cookiefile'] = cookie_file_path
-
-            self.logger.info(f"Attempt {attempt_index}: Trying {attempt['name']} with format: {ydl_opts['format']}")
+            self.logger.info(f"Attempt {attempt_index}: Trying {attempt['name']}...")
 
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -224,7 +218,7 @@ class DownloadManager:
                     if isinstance(info_dict, list):
                         info_dict = next((item for item in info_dict if isinstance(item, dict)), None)
                         if not info_dict:
-                             raise ValueError("No valid video data found (list contained no dict).")
+                             raise ValueError("yt-dlp returned an empty list, likely no videos found.")
 
                     file_path = self._get_file_path(info_dict, temp_dir)
                             
@@ -234,7 +228,6 @@ class DownloadManager:
                         self.logger.info(f"Attempt {attempt_index} successful. Downloaded file: {download_info['file_path']}")
                         return download_info
                     
-                    # If download finished but file path couldn't be located.
                     raise RuntimeError("Download finished, but the final file path could not be located in the temporary directory.")
 
 
@@ -248,11 +241,9 @@ class DownloadManager:
                     break
                 
                 # Clean up temp files from failed download before next attempt
-                # The temp_dir itself is kept for the next attempt/cleanup
                 if os.listdir(temp_dir):
                     for filename in os.listdir(temp_dir):
                         file_to_delete = os.path.join(temp_dir, filename)
-                        # Ensure we don't delete the cookie file if it exists
                         if os.path.isfile(file_to_delete) and file_to_delete != cookie_file_path:
                             os.remove(file_to_delete)
         
@@ -443,4 +434,4 @@ async def root():
 @app.get(PRIVACY_POLICY_PATH, response_class=HTMLResponse)
 async def get_privacy_policy():
     """Serves the privacy policy as a public HTML page."""
-    return PRIVACY_POLICY_HTML
+    return HTMLResponse(content=PRIVACY_POLICY_HTML)
