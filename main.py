@@ -489,7 +489,9 @@ async def update_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------- WEB ENDPOINTS -------------
-@app.get("/", response_class=HTMLResponse)
+from fastapi.responses import JSONResponse
+
+@app.get("/", response_class=JSONResponse)
 async def root():
     return {
         "message": "VidXpress Telegram Bot is live!",
@@ -498,6 +500,7 @@ async def root():
         "privacy_policy": PRIVACY_POLICY_PATH,
         "youtube_cookie_status": "Enabled" if YOUTUBE_COOKIES else "Disabled"
     }
+
 
 
 @app.get(PRIVACY_POLICY_PATH, response_class=HTMLResponse)
