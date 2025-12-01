@@ -438,7 +438,45 @@ async def telegram_webhook(request: Request):
     except Exception as e:
         logger.error(f"Error processing update: {e}")
         return {"status": "error", "message": str(e)}
+ async def update_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text
 
+    data = load_analytics()
+
+    # --- Total users ---
+    if user_id not in data["total_users"]:
+        data["total_users"].append(user_id)
+
+    # --- Total Requests ---
+    data["total_requests"] += 1
+
+    # --- Daily Activity ---
+    today = datetime.now().strftime("%Y-%m-%d")
+    data["daily_usage"][today] = data["daily_usage"].get(today, 0) + 1
+
+    # --- Logs (latest 20 only) ---
+    log_entry = {
+        "user": user_id,
+        "text": text,
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    data["logs"].append(log_entry)
+    data["logs"] = data["logs"][-20:]  # keep last 20
+
+    # Save updated analytics
+    save_analytics(data)
+
+    # --- Send log to admin channel ---
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_CHANNEL,
+            text=f"📊 *New Usage Log*\n👤 User: `{user_id}`\n💬 Msg: `{text}`",
+            parse_mode="Markdown"
+        )
+    except:
+        pass
+        
 # PUBLIC WEB ENDPOINTS
 @app.get("/")
 async def root():
