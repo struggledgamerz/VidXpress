@@ -294,6 +294,8 @@ class TelegramBot:
         )
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await update_analytics(update, context)
+        
         """Handles text messages containing a URL."""
         url = update.message.text
         
