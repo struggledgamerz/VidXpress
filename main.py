@@ -440,36 +440,40 @@ async def telegram_webhook(request: Request):
     except Exception as e:
         logger.error(f"Error processing update: {e}")
         return {"status": "error", "message": str(e)}
- async def update_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+ from datetime import datetime
+
+ADMIN_CHANNEL = -1003479404949  # your channel ID
+
+# ---------- ANALYTICS HANDLER ----------
+async def update_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = update.message.text
+    text = update.message.text or ""
 
     data = load_analytics()
 
-    # --- Total users ---
+    # Total users
     if user_id not in data["total_users"]:
         data["total_users"].append(user_id)
 
-    # --- Total Requests ---
+    # Total Requests
     data["total_requests"] += 1
 
-    # --- Daily Activity ---
+    # Daily Activity
     today = datetime.now().strftime("%Y-%m-%d")
     data["daily_usage"][today] = data["daily_usage"].get(today, 0) + 1
 
-    # --- Logs (latest 20 only) ---
+    # Logs (latest 20 only)
     log_entry = {
         "user": user_id,
         "text": text,
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     data["logs"].append(log_entry)
-    data["logs"] = data["logs"][-20:]  # keep last 20
+    data["logs"] = data["logs"][-20:]  # keep only last 20 logs
 
-    # Save updated analytics
     save_analytics(data)
 
-    # --- Send log to admin channel ---
+    # Send log to admin channel
     try:
         await context.bot.send_message(
             chat_id=ADMIN_CHANNEL,
@@ -478,21 +482,20 @@ async def telegram_webhook(request: Request):
         )
     except:
         pass
-        
-# PUBLIC WEB ENDPOINTS
-@app.get("/")
+
+
+# ---------- PUBLIC WEB ENDPOINTS ----------
+@app.get("/", response_class=HTMLResponse)
 async def root():
-    """Root endpoint to verify the service is running and provides diagnostic info."""
-    # Using a dictionary return for consistency and readability
     return {
         "message": "VidXpress Telegram Bot is running!",
         "status": "active",
         "mode": "WEBHOOK",
-        "privacy_policy_path": f"{PRIVACY_POLICY_PATH}",
-        "youtube_cookie_status": "Enabled" if YOUTUBE_COOKIES else "Disabled (Add YOUTUBE_COOKIES environment variable to enable restricted video downloads)"
+        "privacy_policy_path": PRIVACY_POLICY_PATH,
+        "youtube_cookie_status": "Enabled" if YOUTUBE_COOKIES else "Disabled"
     }
+
 
 @app.get(PRIVACY_POLICY_PATH, response_class=HTMLResponse)
 async def get_privacy_policy():
-    """Serves the privacy policy as a public HTML page."""
     return HTMLResponse(content=PRIVACY_POLICY_HTML)
