@@ -19,7 +19,28 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 import yt_dlp
+# --- ANALYTICS SYSTEM ---
+import json
+from datetime import datetime
 
+ANALYTICS_FILE = "analytics.json"
+ADMIN_CHANNEL = -1003479404949   # Your updates channel ID
+
+def load_analytics():
+    if not os.path.exists(ANALYTICS_FILE):
+        return {
+            "total_users": [],
+            "total_requests": 0,
+            "daily_usage": {},
+            "logs": []
+        }
+    with open(ANALYTICS_FILE, "r") as f:
+        return json.load(f)
+
+def save_analytics(data):
+    with open(ANALYTICS_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+        
 # --- Configuration ---
 # Set the port Uvicorn/FastAPI will listen on 
 PORT = int(os.environ.get('PORT', 5000)) 
