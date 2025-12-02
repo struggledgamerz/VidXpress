@@ -217,7 +217,7 @@ class TelegramBot:
                 await query.answer("❌ You haven't joined yet!", show_alert=True)
                 # Message wahi rahega, bas alert dikhayega
     def download(self, url):
-    return self.download_video(url)
+        return self.download_video(url)
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # 1. Check Subscription First
