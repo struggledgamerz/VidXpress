@@ -143,8 +143,78 @@ async def send_force_join_message(update: Update, context: ContextTypes.DEFAULT_
         except:
             await update.callback_query.message.reply_text(msg_text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
 
-# --- Static Content ---
-PRIVACY_POLICY_HTML = """<!DOCTYPE html><html><body><h1>Privacy Policy</h1><p>Data is deleted immediately after processing.</p></body></html>"""
+# --- Static Privacy Policy Content (for the web endpoint) ---
+PRIVACY_POLICY_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>VidXpress⚡ - Privacy Policy</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f4f4f9;
+            color: #333;
+        }
+        .container {
+            max-width: 700px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #007bff;
+            border-bottom: 2px solid #007bff;
+            padding-bottom: 10px;
+            margin-top: 0;
+        }
+        h2 {
+            color: #555;
+            margin-top: 25px;
+        }
+        p, ul {
+            line-height: 1.6;
+        }
+        ul {
+            list-style-type: disc;
+            padding-left: 20px;
+        }
+        code {
+            background-color: #eee;
+            padding: 2px 4px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>VidXpress⚡ - Privacy Policy</h1>
+        <p>This bot is designed solely to download and relay publicly accessible video content from external platforms (e.g., YouTube, Facebook).</p>
+
+        <h2>1. Data Collection and Processing</h2>
+        <ul>
+            <li><strong>Input Data:</strong> The bot only processes the URL link you send in your message to identify and locate the video source.</li>
+            <li><strong>Personal Data:</strong> We do not collect, store, or share any personal identifying information (like your Telegram User ID or chat history) beyond what is required to fulfill the request.</li>
+        </ul>
+
+        <h2>2. Content Storage and Deletion</h2>
+        <ul>
+            <li><strong>Temporary Files:</strong> Requested videos are downloaded to a temporary location on the host server.</li>
+            <li><strong>No Persistence:</strong> These files are immediately and permanently deleted using the <code>shutil.rmtree()</code> function after they are successfully uploaded to Telegram or if the download/upload process fails. No logs or files related to your requests are retained after the transaction is complete.</li>
+        </ul>
+
+        <h2>3. Third Parties</h2>
+        <p>Video processing relies on the <code>yt-dlp</code> tool to handle video extraction and format detection, and the standard Telegram Bot API for message handling and file uploads.</p>
+        
+        <p style="margin-top: 30px; font-size: 0.9em; color: #777;">Last Updated: November 2025</p>
+    </div>
+</body>
+</html> 
+"""
 
 # --- Telegram Bot Logic ---
 
