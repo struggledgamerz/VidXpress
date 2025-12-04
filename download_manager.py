@@ -3,108 +3,119 @@ import os
 import shutil
 import logging
 import tempfile
-import json 
-import time
+import json
+from typing import Dict, Any, Union
 
+# Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('DownloadManager')
 
-YOUTUBE_COOKIES_JSON = {
-    # Your fresh cookies here
-}
+# Environment variable for cookies (Netscape format content)
+YOUTUBE_COOKIES = os.environ.get('YOUTUBE_COOKIES', '')
+
+# Configuration for max file size (50MB) - This is now defined in main.py, but used here
+MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024
 
 class DownloadManager:
-    def __init__(self):
-        self.temp_dir = None
-        self.temp_cookie_file = None
+    """
+    Manages yt-dlp download operations with custom settings.
+    """
+    # FIX: Correctly accept max_file_size_bytes argument
+    def __init__(self, max_file_size_bytes: int):
+        self.logger = logging.getLogger('DownloadManager')
+        self.max_file_size_bytes = max_file_size_bytes
+        self.max_size_mb = self.max_file_size_bytes / 1024 / 1024
 
-    def __enter__(self):
-        self.temp_dir = tempfile.mkdtemp()
-        logger.info(f"Created temp dir: {self.temp_dir}")
+    def _get_file_path(self, info_dict: Dict[str, Any], temp_dir: str) -> Union[str, None]:
+        """Finds the downloaded file path."""
+        # 1. Check 'requested_downloads' first
+        if 'requested_downloads' in info_dict and isinstance(info_dict['requested_downloads'], list):
+            downloaded_files = [f['filepath'] for f in info_dict['requested_downloads'] if os.path.exists(f['filepath'])]
+            if downloaded_files:
+                return downloaded_files[0]
+        
+        # 2. Fallback: Check directory for file matching ID
+        if os.listdir(temp_dir):
+            video_id = info_dict.get('id', '')
+            for filename in os.listdir(temp_dir):
+                if filename.startswith(video_id) and os.path.isfile(os.path.join(temp_dir, filename)):
+                    return os.path.join(temp_dir, filename)
+        return None
 
-        if YOUTUBE_COOKIES_JSON:
-            try:
-                f = tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.json')
-                json.dump(YOUTUBE_COOKIES_JSON, f, indent=2)
-                f.close()
-                self.temp_cookie_file = f.name
-                logger.info(f"Cookie file created: {self.temp_cookie_file}")
-            except:
-                self.temp_cookie_file = None
-        else:
-            logger.warning("No YouTube cookies provided!")
-
-        return self
-
-    def __exit__(self, *args):
-        if self.temp_dir and os.path.exists(self.temp_dir):
-            shutil.rmtree(self.temp_dir)
-        if self.temp_cookie_file and os.path.exists(self.temp_cookie_file):
-            os.remove(self.temp_cookie_file)
-
-    # ---------------------------------------------------
-    # NEW FUNCTION (needed by main.py)
-    # ---------------------------------------------------
-    def download(self, url: str) -> dict:
+    def download(self, url: str) -> Dict[str, Union[str, bool]]:
         """
-        Wrapper used by main.py — returns a dict with:
-        success, file_path, temp_dir, error
+        Attempts to download the video. Returns status dict.
         """
-        try:
-            with self:
-                file_path = self.download_video(url)
+        temp_dir = tempfile.mkdtemp()
+        download_info = {
+            'success': False,
+            'file_path': None,
+            'error': None,
+            'temp_dir': temp_dir
+        }
+        
+        output_template = os.path.join(temp_dir, '%(id)s.%(ext)s')
 
-                return {
-                    "success": True,
-                    "file_path": file_path,
-                    "temp_dir": self.temp_dir,
-                    "error": None
-                }
+        # Base options
+        ydl_opts_base = {
+            'outtmpl': output_template,
+            'max_filesize': self.max_file_size_bytes, 
+            'noplaylist': True,
+            'quiet': True,
+            'noprogress': True,
+            'logger': self.logger,
+        }
 
-        except Exception as e:
-            return {
-                "success": False,
-                "file_path": None,
-                "temp_dir": self.temp_dir,
-                "error": str(e)
-            }
-
-    # ---------------------------------------------------
-    # Original download logic
-    # ---------------------------------------------------
-    def download_video(self, url: str) -> str:
-        max_retries = 3
-
-        for attempt in range(max_retries):
+        # Handle Cookies
+        cookie_file_path = None
+        if YOUTUBE_COOKIES:
             try:
-                ydl_opts = {
-                    'outtmpl': os.path.join(self.temp_dir, '%(title)s.%(ext)s'),
-                    'format': 'best',
-                    'cookiefile': self.temp_cookie_file,
-                    'quiet': True,
-                    'noprogress': True,
-                    'logger': logger,
-                    'extractor_args': {
-                        'youtube': ['player_client=default']
-                    },
-                    'http_headers': {
-                        'User-Agent': 'Mozilla/5.0'
-                    }
-                }
+                cookie_file_path = os.path.join(temp_dir, 'cookies.txt')
+                with open(cookie_file_path, 'w', encoding='utf-8') as f:
+                    f.write(YOUTUBE_COOKIES)
+                ydl_opts_base['cookiefile'] = cookie_file_path
+            except Exception as e:
+                self.logger.error(f"Cookie creation failed: {e}")
 
+        # Retry Logic: Attempt 1 (Web) -> Attempt 2 (Android Test)
+        attempts = [
+            {'name': 'Web Client', 'args': {'youtube': {'player_client': ['web']}}},
+            {'name': 'Android Client', 'args': {'youtube': {'player_client': ['android_test']}}}
+        ]
+
+        for i, attempt in enumerate(attempts):
+            self.logger.info(f"Attempt {i+1}: Using {attempt['name']}")
+            ydl_opts = ydl_opts_base.copy()
+            ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+            ydl_opts['extractor_args'] = attempt['args']
+
+            try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=True)
-                    filename = ydl.prepare_filename(info)
-                    return filename
+                    
+                    # Handle playlist/list result
+                    if isinstance(info, list):
+                        info = info[0] if info else None
+                    
+                    if not info:
+                        raise ValueError("Empty info result")
 
-            except yt_dlp.utils.DownloadError as e:
-                if "Sign in" in str(e):
-                    raise Exception("Cookie Authentication Failed!")
+                    path = self._get_file_path(info, temp_dir)
+                    if path:
+                        download_info['success'] = True
+                        download_info['file_path'] = path
+                        return download_info
+            
+            except Exception as e:
+                error_msg = str(e)
+                self.logger.warning(f"Attempt {i+1} failed: {error_msg}")
+                download_info['error'] = error_msg
                 
-                if attempt < max_retries - 1:
-                    time.sleep(5)
-                else:
-                    raise Exception(str(e))
+                # Clean up non-cookie files before retry
+                for f in os.listdir(temp_dir):
+                    f_path = os.path.join(temp_dir, f)
+                    if f_path != cookie_file_path:
+                        try: os.remove(f_path)
+                        except: pass
 
-        raise Exception("Unknown error")
-      
+        return download_info
