@@ -9,15 +9,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, 
     MessageHandler, 
     filters, 
     ContextTypes, 
     CommandHandler,
-    Application,
-    CallbackQueryHandler
+    Application
 )
 from telegram.constants import ParseMode
 
@@ -31,19 +30,13 @@ BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '7817163480:AAE4Z1dBE_LK9gTN75x
 # Public URL of the deployed service
 WEBHOOK_URL = os.environ.get('WEBHOOK_BASE_URL', 'https://ff-like-bot-px1w.onrender.com') 
 YOUTUBE_COOKIES = os.environ.get('YOUTUBE_COOKIES', '')
-
-# --- NEW: Force Join Configuration ---
-# Yahan apne channel ka Username (@channel) ya ID (-100...) dalein.
-# Example: "@VidXpressOfficial"
 FORCE_CHANNEL_ID = os.environ.get('FORCE_CHANNEL_ID', '') 
 
 WEBHOOK_PATH = f"/{BOT_TOKEN}" if BOT_TOKEN else "/webhook"
 PRIVACY_POLICY_PATH = "/privacy"
 MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024 
-
-# --- Analytics Configuration ---
-ANALYTICS_FILE = "analytics.json"
 ADMIN_CHANNEL_ID = -1003479404949 
+ANALYTICS_FILE = "analytics.json"
 
 # Set up logging
 logging.basicConfig(
@@ -76,33 +69,26 @@ async def update_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = update.effective_user.id
-    text = "Action"
-    if update.message and update.message.text:
-        text = update.message.text
-    elif update.callback_query:
-        text = f"Button: {update.callback_query.data}"
-    
+    # Get text from message or callback query
+    text = update.message.text if update.message and update.message.text else (
+           f"Button: {update.callback_query.data}" if update.callback_query else "Unknown Action"
+    )
     username = update.effective_user.username or "Unknown"
 
     # 1. Update Local JSON
     data = load_analytics()
-
     if user_id not in data["total_users"]:
         data["total_users"].append(user_id)
-
+    
     data["total_requests"] += 1
     today = datetime.now().strftime("%Y-%m-%d")
     data["daily_usage"][today] = data["daily_usage"].get(today, 0) + 1
 
     log_entry = {
-        "user": user_id,
-        "username": username,
-        "text": text,
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        "user": user_id, "username": username, "text": text, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     data["logs"].append(log_entry)
     data["logs"] = data["logs"][-50:] 
-    
     save_analytics(data)
 
     # 2. Send Log to Admin Channel
@@ -114,9 +100,7 @@ async def update_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"💬 <b>Action:</b> {text}"
             )
             await context.bot.send_message(
-                chat_id=ADMIN_CHANNEL_ID,
-                text=log_message,
-                parse_mode=ParseMode.HTML
+                chat_id=ADMIN_CHANNEL_ID, text=log_message, parse_mode=ParseMode.HTML
             )
         except Exception as e:
             logger.warning(f"Admin log failed: {e}")
@@ -124,51 +108,38 @@ async def update_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Helper: Force Join Check ---
 
 async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """
-    Checks if the user is a member of the forced channel.
-    Returns True if member (or if force join is disabled), False otherwise.
-    """
-    # Agar FORCE_CHANNEL_ID set nahi hai, toh check skip karo
-    if not FORCE_CHANNEL_ID:
-        return True
-        
+    """Checks if the user is a member of the forced channel."""
+    if not FORCE_CHANNEL_ID: return True
     user_id = update.effective_user.id
     
     try:
         member = await context.bot.get_chat_member(chat_id=FORCE_CHANNEL_ID, user_id=user_id)
-        # 'left' means user has left, 'kicked' means banned. 
-        # 'creator', 'administrator', 'member', 'restricted' are allowed.
-        if member.status in ['left', 'kicked']:
-            return False
+        if member.status in ['left', 'kicked']: return False
         return True
     except Exception as e:
         logger.error(f"Error checking membership for {FORCE_CHANNEL_ID}: {e}")
-        # Agar bot admin nahi hai ya channel galat hai, toh hum user ko block nahi karenge
-        # taaki bot chalta rahe.
         return True
 
 async def send_force_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends a message asking the user to join the channel."""
-    # Channel link generate karein
-    channel_url = f"https://t.me/{FORCE_CHANNEL_ID.replace('@', '')}"
+    # Ensure correct URL link is used for the button
+    channel_url = f"https://t.me/{FORCE_CHANNEL_ID.lstrip('@')}"
     
-    keyboard = [
-        [InlineKeyboardButton("📢 Join Channel", url=channel_url)],
-        [InlineKeyboardButton("✅ I Have Joined", callback_data="check_subscription")]
-    ]
+    keyboard = [[InlineKeyboardButton("📢 Join Channel", url=channel_url)],
+                [InlineKeyboardButton("✅ I Have Joined", callback_data="check_subscription")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    msg_text = (
-        "👋 **Welcome!**\n\n"
-        "To use this bot, you must join our official updates channel first.\n\n"
-        "Please join and then click 'I Have Joined'."
-    )
+    msg_text = ("👋 **Welcome!**\n\nTo use this bot, you must join our official updates channel first.\n\n"
+                "Please join and then click 'I Have Joined'.")
     
-    if update.message:
+    # Use edit_message_text if it was a callback, otherwise use reply_text
+    if update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(msg_text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+        except:
+            await update.callback_query.message.reply_text(msg_text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+    elif update.message:
         await update.message.reply_text(msg_text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
-    elif update.callback_query:
-        # Agar button click se aaya hai (re-check)
-        await update.callback_query.edit_message_text(msg_text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
 
 # --- Static Content ---
 PRIVACY_POLICY_HTML = """<!DOCTYPE html><html><body><h1>Privacy Policy</h1><p>Data is deleted immediately after processing.</p></body></html>"""
@@ -177,19 +148,18 @@ PRIVACY_POLICY_HTML = """<!DOCTYPE html><html><body><h1>Privacy Policy</h1><p>Da
 
 class TelegramBot:
     def __init__(self, token: str, max_file_size: int):
-        self.download_manager = DownloadManager()
+        self.download_manager = DownloadManager(max_file_size)
         self.app = ApplicationBuilder().token(token).build()
         
         # Handlers
         self.app.add_handler(CommandHandler("start", self.start))
-        self.app.add_handler(CallbackQueryHandler(self.handle_callback)) # For "I Have Joined" button
+        self.app.add_handler(CallbackQueryHandler(self.handle_callback)) 
         self.app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message))
         
         self.logger = logging.getLogger('TelegramBot')
         self.max_file_size = max_file_size
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        # 1. Check Subscription First
         if not await check_membership(update, context):
             await send_force_join_message(update, context)
             return
@@ -200,7 +170,8 @@ class TelegramBot:
         
         await update.message.reply_text(
             f'👋 **Welcome to VidXpress!**\n\n'
-            f'Send me any video link from YouTube, Instagram, Facebook, etc.\n\n'
+            f'Send me any video link from YouTube, Facebook, etc.\n\n'
+            f'🍪 **Auth Status:** {cookie_status}\n'
             f'⚠️ **Limit:** 50MB per video.\n'
             f'[Privacy Policy]({policy_url})', 
             parse_mode=ParseMode.MARKDOWN
@@ -215,12 +186,8 @@ class TelegramBot:
                 await query.edit_message_text("✅ **Thanks for joining!**\n\nNow you can send me any video link to download.", parse_mode=ParseMode.MARKDOWN)
             else:
                 await query.answer("❌ You haven't joined yet!", show_alert=True)
-                # Message wahi rahega, bas alert dikhayega
-    def download(self, url):
-        return self.download_video(url)
-    
+
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        # 1. Check Subscription First
         if not await check_membership(update, context):
             await send_force_join_message(update, context)
             return
@@ -229,11 +196,6 @@ class TelegramBot:
         
         url = update.message.text
         if not url: return
-        
-        # 2. Guardrail for YouTube (Optional - uncomment if needed)
-        # if "youtube.com" in url or "youtu.be" in url:
-        #     await update.message.reply_text("❌ YouTube downloads are currently disabled.")
-        #     return
 
         processing_message = await update.message.reply_text("⏳ Processing link...", parse_mode=ParseMode.HTML)
 
