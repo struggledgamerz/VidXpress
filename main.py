@@ -15,6 +15,7 @@ from telegram.ext import (
     MessageHandler, 
     filters, 
     ContextTypes, 
+    CallbackQueryHandler,
     CommandHandler,
     Application
 )
