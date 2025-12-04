@@ -148,7 +148,7 @@ PRIVACY_POLICY_HTML = """<!DOCTYPE html><html><body><h1>Privacy Policy</h1><p>Da
 
 class TelegramBot:
     def __init__(self, token: str, max_file_size: int):
-        self.download_manager = DownloadManager(max_file_size)
+        self.download_manager = DownloadManager()
         self.app = ApplicationBuilder().token(token).build()
         
         # Handlers
