@@ -1,7 +1,7 @@
 import os
 import logging
 import shutil
-import asyncio
+import asyncio 
 import json
 from datetime import datetime
 from typing import Dict, Any, Union
@@ -9,26 +9,24 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, 
     MessageHandler, 
     filters, 
     ContextTypes, 
-    CallbackQueryHandler,
     CommandHandler,
-    Application
+    Application,
+    CallbackQueryHandler
 )
 from telegram.constants import ParseMode
 
-# Import local DownloadManager
+# Import local DownloadManager (Assuming it takes max_file_size_bytes)
 from download_manager import DownloadManager 
 
 # --- Configuration ---
 PORT = int(os.environ.get('PORT', 5000)) 
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '7817163480:AAE4Z1dBE_LK9gTN75xOc5Q4Saq29RmhAvY')
-
-# Public URL of the deployed service
 WEBHOOK_URL = os.environ.get('WEBHOOK_BASE_URL', 'https://ff-like-bot-px1w.onrender.com') 
 YOUTUBE_COOKIES = os.environ.get('YOUTUBE_COOKIES', '')
 FORCE_CHANNEL_ID = os.environ.get('FORCE_CHANNEL_ID', '') 
@@ -78,9 +76,10 @@ async def update_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 1. Update Local JSON
     data = load_analytics()
+
     if user_id not in data["total_users"]:
         data["total_users"].append(user_id)
-    
+
     data["total_requests"] += 1
     today = datetime.now().strftime("%Y-%m-%d")
     data["daily_usage"][today] = data["daily_usage"].get(today, 0) + 1
@@ -90,6 +89,7 @@ async def update_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     data["logs"].append(log_entry)
     data["logs"] = data["logs"][-50:] 
+    
     save_analytics(data)
 
     # 2. Send Log to Admin Channel
@@ -101,7 +101,9 @@ async def update_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"💬 <b>Action:</b> {text}"
             )
             await context.bot.send_message(
-                chat_id=ADMIN_CHANNEL_ID, text=log_message, parse_mode=ParseMode.HTML
+                chat_id=ADMIN_CHANNEL_ID,
+                text=log_message,
+                parse_mode=ParseMode.HTML
             )
         except Exception as e:
             logger.warning(f"Admin log failed: {e}")
@@ -123,8 +125,8 @@ async def check_membership(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def send_force_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sends a message asking the user to join the channel."""
-    # Ensure correct URL link is used for the button
-    channel_url = f"https://t.me/{FORCE_CHANNEL_ID.lstrip('@')}"
+    clean_id = FORCE_CHANNEL_ID.lstrip('@')
+    channel_url = f"https://t.me/{clean_id}"
     
     keyboard = [[InlineKeyboardButton("📢 Join Channel", url=channel_url)],
                 [InlineKeyboardButton("✅ I Have Joined", callback_data="check_subscription")]]
@@ -133,14 +135,13 @@ async def send_force_join_message(update: Update, context: ContextTypes.DEFAULT_
     msg_text = ("👋 **Welcome!**\n\nTo use this bot, you must join our official updates channel first.\n\n"
                 "Please join and then click 'I Have Joined'.")
     
-    # Use edit_message_text if it was a callback, otherwise use reply_text
-    if update.callback_query:
+    if update.message:
+        await update.message.reply_text(msg_text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+    elif update.callback_query:
         try:
             await update.callback_query.edit_message_text(msg_text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
         except:
             await update.callback_query.message.reply_text(msg_text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
-    elif update.message:
-        await update.message.reply_text(msg_text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
 
 # --- Static Content ---
 PRIVACY_POLICY_HTML = """<!DOCTYPE html><html><body><h1>Privacy Policy</h1><p>Data is deleted immediately after processing.</p></body></html>"""
@@ -149,10 +150,10 @@ PRIVACY_POLICY_HTML = """<!DOCTYPE html><html><body><h1>Privacy Policy</h1><p>Da
 
 class TelegramBot:
     def __init__(self, token: str, max_file_size: int):
-        self.download_manager = DownloadManager()
+        # FIX: Ensure DownloadManager is initialized with MAX_FILE_SIZE_BYTES
+        self.download_manager = DownloadManager(max_file_size) 
         self.app = ApplicationBuilder().token(token).build()
         
-        # Handlers
         self.app.add_handler(CommandHandler("start", self.start))
         self.app.add_handler(CallbackQueryHandler(self.handle_callback)) 
         self.app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message))
@@ -171,7 +172,7 @@ class TelegramBot:
         
         await update.message.reply_text(
             f'👋 **Welcome to VidXpress!**\n\n'
-            f'Send me any video link from YouTube, Facebook, etc.\n\n'
+            f'Send me any video link from YouTube, Instagram, Facebook, etc.\n\n'
             f'🍪 **Auth Status:** {cookie_status}\n'
             f'⚠️ **Limit:** 50MB per video.\n'
             f'[Privacy Policy]({policy_url})', 
@@ -189,6 +190,7 @@ class TelegramBot:
                 await query.answer("❌ You haven't joined yet!", show_alert=True)
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        # 1. Check Subscription First
         if not await check_membership(update, context):
             await send_force_join_message(update, context)
             return
@@ -252,7 +254,8 @@ async def lifespan(app: FastAPI):
     global application
     if BOT_TOKEN:
         logger.info("Initializing Bot...")
-        bot_instance = TelegramBot(token=BOT_TOKEN, max_file_size=MAX_FILE_SIZE_BYTES)
+        # FIX: Pass max_file_size correctly to TelegramBot
+        bot_instance = TelegramBot(token=BOT_TOKEN, max_file_size=MAX_FILE_SIZE_BYTES) 
         application = bot_instance.app
         await application.initialize()
         await application.start()
