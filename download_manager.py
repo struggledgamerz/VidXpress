@@ -61,6 +61,8 @@ class DownloadManager:
             'outtmpl': output_template,
             'max_filesize': self.max_file_size_bytes, 
             'noplaylist': True,
+            # Pinterest fix – force actual video formats only
+            'format': 'mp4[ext=mp4]/mp4/best',
             'quiet': True,
             'noprogress': True,
             'logger': self.logger,
