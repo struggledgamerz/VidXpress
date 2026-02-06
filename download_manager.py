@@ -1,123 +1,114 @@
-import yt_dlp
 import os
-import shutil
 import logging
+import subprocess
 import tempfile
-import json
-from typing import Dict, Any, Union
+from typing import Dict, Any
 
-# Logging setup
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger('DownloadManager')
-
-# Environment variable for cookies (Netscape format content)
-YOUTUBE_COOKIES = os.environ.get('YOUTUBE_COOKIES', '')
-
-# Configuration for max file size (50MB) - This is now defined in main.py, but used here
-MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 class DownloadManager:
-    """
-    Manages yt-dlp download operations with custom settings.
-    """
-    # FIX: Correctly accept max_file_size_bytes argument
-    def __init__(self, max_file_size_bytes: int):
-        self.logger = logging.getLogger('DownloadManager')
+    def __init__(self, max_file_size_bytes: int = 50 * 1024 * 1024):
         self.max_file_size_bytes = max_file_size_bytes
-        self.max_size_mb = self.max_file_size_bytes / 1024 / 1024
+        self.logger = logging.getLogger('DownloadManager')
 
-    def _get_file_path(self, info_dict: Dict[str, Any], temp_dir: str) -> Union[str, None]:
-        """Finds the downloaded file path."""
-        # 1. Check 'requested_downloads' first
-        if 'requested_downloads' in info_dict and isinstance(info_dict['requested_downloads'], list):
-            downloaded_files = [f['filepath'] for f in info_dict['requested_downloads'] if os.path.exists(f['filepath'])]
-            if downloaded_files:
-                return downloaded_files[0]
+    def download(self, url: str, audio_only: bool = False) -> Dict[str, Any]:
+        """
+        Download video or audio from URL.
         
-        # 2. Fallback: Check directory for file matching ID
-        if os.listdir(temp_dir):
-            video_id = info_dict.get('id', '')
-            for filename in os.listdir(temp_dir):
-                if filename.startswith(video_id) and os.path.isfile(os.path.join(temp_dir, filename)):
-                    return os.path.join(temp_dir, filename)
+        Args:
+            url: The video URL to download
+            audio_only: If True, extract only audio; if False, download video
+            
+        Returns:
+            Dictionary with 'success', 'file_path', 'temp_dir', and 'error' keys
+        """
+        temp_dir = None
+        file_path = None
+        
+        try:
+            # Create a temporary directory for this download
+            temp_dir = tempfile.mkdtemp()
+            
+            if audio_only:
+                # Download audio only
+                file_path = self._download_audio(url, temp_dir)
+            else:
+                # Download video
+                file_path = self._download_video(url, temp_dir)
+            
+            if file_path and os.path.exists(file_path):
+                file_size = os.path.getsize(file_path)
+                
+                if file_size > self.max_file_size_bytes:
+                    return {
+                        'success': False,
+                        'file_path': None,
+                        'temp_dir': temp_dir,
+                        'error': f'File size ({file_size / 1024 / 1024:.2f}MB) exceeds limit ({self.max_file_size_bytes / 1024 / 1024:.2f}MB)'
+                    }
+                
+                return {
+                    'success': True,
+                    'file_path': file_path,
+                    'temp_dir': temp_dir,
+                    'error': None
+                }
+            else:
+                return {
+                    'success': False,
+                    'file_path': None,
+                    'temp_dir': temp_dir,
+                    'error': 'Failed to download file'
+                }
+        
+        except Exception as e:
+            self.logger.error(f"Download error: {str(e)}")
+            return {
+                'success': False,
+                'file_path': None,
+                'temp_dir': temp_dir,
+                'error': str(e)
+            }
+
+    def _download_video(self, url: str, temp_dir: str) -> str:
+        """Download video using yt-dlp."""
+        output_template = os.path.join(temp_dir, '%(title)s.%(ext)s')
+        
+        cmd = [
+            'yt-dlp',
+            '-f', 'best[ext=mp4]',
+            '-o', output_template,
+            url
+        ]
+        
+        subprocess.run(cmd, check=True, capture_output=True)
+        
+        # Find the downloaded file
+        for file in os.listdir(temp_dir):
+            if file.endswith(('.mp4', '.mkv', '.webm', '.avi')):
+                return os.path.join(temp_dir, file)
+        
         return None
 
-    def download(self, url: str) -> Dict[str, Union[str, bool]]:
-        """
-        Attempts to download the video. Returns status dict.
-        """
-        temp_dir = tempfile.mkdtemp()
-        download_info = {
-            'success': False,
-            'file_path': None,
-            'error': None,
-            'temp_dir': temp_dir
-        }
+    def _download_audio(self, url: str, temp_dir: str) -> str:
+        """Download audio using yt-dlp and convert to MP3."""
+        output_template = os.path.join(temp_dir, '%(title)s.%(ext)s')
         
-        output_template = os.path.join(temp_dir, '%(id)s.%(ext)s')
-
-        # Base options
-        ydl_opts_base = {
-            'outtmpl': output_template,
-            'max_filesize': self.max_file_size_bytes, 
-            'noplaylist': True,
-            # Pinterest fix – force actual video formats only
-            'format': 'mp4[ext=mp4]/mp4/best',
-            'quiet': True,
-            'noprogress': True,
-            'logger': self.logger,
-        }
-
-        # Handle Cookies
-        cookie_file_path = None
-        if YOUTUBE_COOKIES:
-            try:
-                cookie_file_path = os.path.join(temp_dir, 'cookies.txt')
-                with open(cookie_file_path, 'w', encoding='utf-8') as f:
-                    f.write(YOUTUBE_COOKIES)
-                ydl_opts_base['cookiefile'] = cookie_file_path
-            except Exception as e:
-                self.logger.error(f"Cookie creation failed: {e}")
-
-        # Retry Logic: Attempt 1 (Web) -> Attempt 2 (Android Test)
-        attempts = [
-            {'name': 'Web Client', 'args': {'youtube': {'player_client': ['web']}}},
-            {'name': 'Android Client', 'args': {'youtube': {'player_client': ['android_test']}}}
+        cmd = [
+            'yt-dlp',
+            '-f', 'bestaudio/best',
+            '-x',  # Extract audio
+            '--audio-format', 'mp3',
+            '--audio-quality', '192',
+            '-o', output_template,
+            url
         ]
-
-        for i, attempt in enumerate(attempts):
-            self.logger.info(f"Attempt {i+1}: Using {attempt['name']}")
-            ydl_opts = ydl_opts_base.copy()
-            ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
-            ydl_opts['extractor_args'] = attempt['args']
-
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    
-                    # Handle playlist/list result
-                    if isinstance(info, list):
-                        info = info[0] if info else None
-                    
-                    if not info:
-                        raise ValueError("Empty info result")
-
-                    path = self._get_file_path(info, temp_dir)
-                    if path:
-                        download_info['success'] = True
-                        download_info['file_path'] = path
-                        return download_info
-            
-            except Exception as e:
-                error_msg = str(e)
-                self.logger.warning(f"Attempt {i+1} failed: {error_msg}")
-                download_info['error'] = error_msg
-                
-                # Clean up non-cookie files before retry
-                for f in os.listdir(temp_dir):
-                    f_path = os.path.join(temp_dir, f)
-                    if f_path != cookie_file_path:
-                        try: os.remove(f_path)
-                        except: pass
-
-        return download_info
+        
+        subprocess.run(cmd, check=True, capture_output=True)
+        
+        # Find the downloaded audio file
+        for file in os.listdir(temp_dir):
+            if file.endswith('.mp3'):
+                return os.path.join(temp_dir, file)
+        
+        return None
