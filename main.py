@@ -198,13 +198,13 @@ PRIVACY_POLICY_HTML = """
         <h2>1. Data Collection and Processing</h2>
         <ul>
             <li><strong>Input Data:</strong> The bot only processes the URL link you send in your message to identify and locate the video source.</li>
-            <li><strong>Personal Data:</strong> We do not collect, store, or share any personal identifying information (like your Telegram User ID or chat history) beyond what is required to fulfill the request.</li>
+            <li><strong>Personal Data:</strong> We do not collect, store, or share any personal identifying information (like your Telegram User ID or chat history) beyond what is required to fulfill [...]
         </ul>
 
         <h2>2. Content Storage and Deletion</h2>
         <ul>
             <li><strong>Temporary Files:</strong> Requested videos are downloaded to a temporary location on the host server.</li>
-            <li><strong>No Persistence:</strong> These files are immediately and permanently deleted using the <code>shutil.rmtree()</code> function after they are successfully uploaded to Telegram or if the download/upload process fails. No logs or files related to your requests are retained after the transaction is complete.</li>
+            <li><strong>No Persistence:</strong> These files are immediately and permanently deleted using the <code>shutil.rmtree()</code> function after they are successfully uploaded to Telegram or[...]
         </ul>
 
         <h2>3. Third Parties</h2>
@@ -258,6 +258,103 @@ class TelegramBot:
                 await query.edit_message_text("✅ **Thanks for joining!**\n\nNow you can send me any video link to download.", parse_mode=ParseMode.MARKDOWN)
             else:
                 await query.answer("❌ You haven't joined yet!", show_alert=True)
+        
+        # Handle format selection callbacks
+        elif query.data.startswith("download_"):
+            await self.process_download(query.data, update, context)
+
+    async def process_download(self, callback_data: str, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Process the download request based on format selection."""
+        try:
+            # Extract format and URL from callback data
+            # Format: download_{audio|video}_{message_id}
+            parts = callback_data.split('_')
+            if len(parts) < 3:
+                await update.callback_query.answer("Invalid request", show_alert=True)
+                return
+            
+            download_format = parts[1]  # 'audio' or 'video'
+            url = context.user_data.get('pending_url')
+            
+            if not url:
+                await update.callback_query.answer("Link expired. Please send it again.", show_alert=True)
+                return
+            
+            # Edit the message to show processing status
+            processing_message = update.callback_query.message
+            await processing_message.edit_text("⏳ Processing your request...", parse_mode=ParseMode.HTML)
+            
+            try:
+                # Run blocking I/O in a separate thread
+                if download_format == "audio":
+                    download_result = await asyncio.to_thread(
+                        self.download_manager.download, url, audio_only=True
+                    )
+                else:  # video
+                    download_result = await asyncio.to_thread(
+                        self.download_manager.download, url, audio_only=False
+                    )
+                
+                temp_dir = download_result.get('temp_dir')
+                
+                if not download_result['success']:
+                    error = download_result['error']
+                    hint = ""
+                    if "Sign in" in str(error): 
+                        hint = "\n🛑 Login required (Cookies invalid)."
+                    await processing_message.edit_text(
+                        f"❌ Failed: {error}{hint}",
+                        parse_mode=ParseMode.HTML
+                    )
+                    return
+                
+                file_path = download_result['file_path']
+                
+                # Delete the processing message
+                try:
+                    await processing_message.delete()
+                except:
+                    pass
+                
+                if file_path and os.path.exists(file_path):
+                    if download_format == "audio":
+                        # Send as audio file
+                        await update.callback_query.message.reply_audio(
+                            audio=open(file_path, 'rb'),
+                            caption="🎵 Audio extracted via VidXpress",
+                            read_timeout=60,
+                            write_timeout=60
+                        )
+                    else:
+                        # Send as video file
+                        await update.callback_query.message.reply_video(
+                            video=open(file_path, 'rb'),
+                            caption="✅ Downloaded via VidXpress",
+                            read_timeout=60,
+                            write_timeout=60
+                        )
+                else:
+                    await update.callback_query.message.reply_text("❌ File missing after download.")
+            
+            except Exception as e:
+                self.logger.error(f"Download error: {e}")
+                await processing_message.edit_text(
+                    "❌ Error occurred during processing.",
+                    parse_mode=ParseMode.HTML
+                )
+            finally:
+                if 'temp_dir' in locals() and temp_dir and os.path.exists(temp_dir):
+                    try:
+                        shutil.rmtree(temp_dir)
+                    except:
+                        pass
+                # Clear the stored URL
+                if 'pending_url' in context.user_data:
+                    del context.user_data['pending_url']
+        
+        except Exception as e:
+            self.logger.error(f"Callback error: {e}")
+            await update.callback_query.answer("An error occurred. Please try again.", show_alert=True)
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # 1. Check Subscription First
@@ -268,52 +365,29 @@ class TelegramBot:
         await update_analytics(update, context)
         
         url = update.message.text
-        if not url: return
+        if not url:
+            return
 
-        processing_message = await update.message.reply_text("⏳ Processing link...", parse_mode=ParseMode.HTML)
-
-        try:
-            # Run blocking I/O in a separate thread
-            download_result = await asyncio.to_thread(self.download_manager.download, url)
-            temp_dir = download_result.get('temp_dir')
-            
-            if not download_result['success']:
-                error = download_result['error']
-                hint = ""
-                if "Sign in" in str(error): hint = "\n🛑 Login required (Cookies invalid)."
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id, 
-                    message_id=processing_message.message_id,
-                    text=f"❌ Failed: {error}{hint}"
-                )
-                return
-
-            file_path = download_result['file_path']
-            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing_message.message_id)
-            
-            if file_path and os.path.exists(file_path):
-                await update.message.reply_video(
-                    video=open(file_path, 'rb'),
-                    caption="✅ Downloaded via VidXpress",
-                    read_timeout=60, 
-                    write_timeout=60
-                )
-            else:
-                await update.message.reply_text("❌ File missing after download.")
-
-        except Exception as e:
-            self.logger.error(f"Error: {e}")
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id, 
-                    message_id=processing_message.message_id,
-                    text="❌ Error occurred during processing."
-                )
-            except: pass
-        finally:
-            if 'temp_dir' in locals() and temp_dir and os.path.exists(temp_dir):
-                try: shutil.rmtree(temp_dir)
-                except: pass
+        # Store URL in user_data for later use in callback
+        context.user_data['pending_url'] = url
+        
+        # Create inline buttons for format selection
+        keyboard = [
+            [
+                InlineKeyboardButton("🎵 Audio Only", callback_data="download_audio_0"),
+                InlineKeyboardButton("🎬 Video", callback_data="download_video_0")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Send message with format selection buttons
+        await update.message.reply_text(
+            "📥 **Choose download format:**\n\n"
+            "🎵 Audio Only - Extract just the audio\n"
+            "🎬 Video - Download the full video",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=reply_markup
+        )
 
 # --- FastAPI & Lifespan ---
 
